@@ -26,6 +26,10 @@ pub const BlockParser = struct {
     refmap: std.StringHashMap(RefDef),
     // State for tracking partial link reference definitions
     partial_refdef: ?PartialRefDef,
+    // Store the original line with indentation (before stripping)
+    current_line_remaining: []const u8,
+    // Track if current line is a lazy continuation (no container markers)
+    is_lazy_continuation: bool,
 
     const PartialRefDef = struct {
         label: []const u8,
@@ -58,6 +62,8 @@ pub const BlockParser = struct {
             .html_block_type = 0,
             .refmap = std.StringHashMap(RefDef).init(allocator),
             .partial_refdef = null,
+            .current_line_remaining = "",
+            .is_lazy_continuation = false,
         };
     }
 
@@ -104,6 +110,7 @@ pub const BlockParser = struct {
     fn incorporateLine(self: *BlockParser, line: []const u8) !void {
         self.offset = 0;
         self.column = 0;
+        self.is_lazy_continuation = false; // Reset at start of each line
 
         // If we're in an HTML block, check for end condition
         if (self.in_html_block) {
@@ -112,18 +119,6 @@ pub const BlockParser = struct {
                 self.in_html_block = false;
                 self.tip = self.tip.parent.?;
             }
-            return;
-        }
-
-        // If we're in a fenced code block, check for closing fence
-        if (self.in_fenced_code) {
-            if (try self.checkClosingFence(line)) {
-                self.in_fenced_code = false;
-                self.tip = self.tip.parent.?;
-                return;
-            }
-            // Add line to fenced code block
-            try self.addToFencedCodeBlock(line);
             return;
         }
 
@@ -186,18 +181,37 @@ pub const BlockParser = struct {
 
         // Close unmatched containers
         while (self.tip != matched_container) {
+            // If we're closing a fenced code block, update the flag
+            if (self.tip.type == .code_block and self.in_fenced_code) {
+                self.in_fenced_code = false;
+            }
             self.tip = self.tip.parent.?;
         }
 
         self.last_matched_container = matched_container;
+
+        // Get remaining line content after container markers
+        const remaining = if (current_offset < line.len) line[current_offset..] else "";
+
+        // If we're in a fenced code block, handle it after matching containers
+        if (self.in_fenced_code) {
+            if (try self.checkClosingFence(remaining)) {
+                self.in_fenced_code = false;
+                self.tip = self.tip.parent.?;
+                return;
+            }
+            // Add line to fenced code block (use remaining after container matching)
+            try self.addToFencedCodeBlock(remaining);
+            return;
+        }
 
         // Don't process blank lines further
         if (is_blank) {
             return;
         }
 
-        // Get remaining line content after container markers
-        const remaining = if (current_offset < line.len) line[current_offset..] else "";
+        // Store the remaining line before stripping indentation
+        self.current_line_remaining = remaining;
 
         // Check indentation of remaining content
         const indent = utils.calculateIndentation(remaining);
@@ -279,6 +293,77 @@ pub const BlockParser = struct {
         try self.processLineContent(content);
     }
 
+    fn looksLikeStructuralElement(line: []const u8) bool {
+        // Check if line looks like it would start a structural element
+        // This is a simplified check for common cases
+
+        // Strip up to 3 spaces of indentation
+        const indent_count = utils.calculateIndentation(line);
+        const content = if (indent_count <= 3) utils.skipIndentation(line, @min(indent_count, 3)) else line;
+        if (content.len == 0) return false;
+
+        const ch = content[0];
+
+        // Thematic break: ---, ***, ___
+        if (ch == '-' or ch == '*' or ch == '_') {
+            var count: usize = 0;
+            for (content) |c| {
+                if (c == ch) {
+                    count += 1;
+                } else if (c != ' ' and c != '\t') {
+                    break;
+                }
+            }
+            if (count >= 3) return true; // Likely thematic break
+        }
+
+        // ATX heading: #
+        if (ch == '#') {
+            return true;
+        }
+
+        // List items: -, +, *, or digits followed by . or )
+        if (ch == '-' or ch == '+' or ch == '*') {
+            if (content.len >= 2 and (content[1] == ' ' or content[1] == '\t')) {
+                return true;
+            }
+        }
+        if (ch >= '0' and ch <= '9') {
+            var i: usize = 1;
+            while (i < content.len and content[i] >= '0' and content[i] <= '9') : (i += 1) {}
+            if (i < content.len and (content[i] == '.' or content[i] == ')')) {
+                if (i + 1 < content.len and (content[i + 1] == ' ' or content[i + 1] == '\t')) {
+                    return true;
+                }
+            }
+        }
+
+        // Block quote: >
+        if (ch == '>') {
+            return true;
+        }
+
+        // Fenced code block: ``` or ~~~
+        if (ch == '`' or ch == '~') {
+            var count: usize = 0;
+            for (content) |c| {
+                if (c == ch) {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if (count >= 3) return true;
+        }
+
+        // HTML block: <
+        if (ch == '<') {
+            return true;
+        }
+
+        return false;
+    }
+
     fn matchContainer(self: *BlockParser, container: *Node, line: []const u8, offset: *usize, is_blank: bool) !bool {
         switch (container.type) {
             .block_quote => {
@@ -293,12 +378,20 @@ pub const BlockParser = struct {
                 if (offset.* >= line.len or line[offset.*] != '>') {
                     // No '>' marker - check if we can do lazy continuation
                     // Lazy continuation only works if we're currently in a paragraph
+                    // and the line doesn't look like a structural element
                     if (self.tip.type == .paragraph) {
+                        // Check if line looks like a structural element that would interrupt the paragraph
+                        const remaining_line = if (offset.* < line.len) line[offset.*..] else "";
+                        if (looksLikeStructuralElement(remaining_line)) {
+                            return false;
+                        }
+
                         var check = self.tip.parent;
                         while (check) |node| {
                             if (node == container) {
                                 // We're in a paragraph inside this block quote
                                 // Allow lazy continuation (don't consume anything)
+                                self.is_lazy_continuation = true;
                                 return true;
                             }
                             check = node.parent;
@@ -428,9 +521,14 @@ pub const BlockParser = struct {
     }
 
     fn parseThematicBreak(self: *BlockParser, line: []const u8) !bool {
-        var s = line;
-        s = utils.trimLeft(s);
+        // Thematic breaks can only have 0-3 spaces of indentation
+        // Since we've already stripped up to 3 spaces in incorporateLine,
+        // if there's ANY leading whitespace here, it means there were 4+ spaces
+        if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) {
+            return false;
+        }
 
+        const s = line;
         if (s.len == 0) return false;
 
         const ch = s[0];
@@ -451,6 +549,11 @@ pub const BlockParser = struct {
                 self.tip = self.tip.parent.?;
             }
 
+            // Close any open list (thematic breaks can't be in lists)
+            if (self.tip.type == .list) {
+                self.tip = self.tip.parent.?;
+            }
+
             // Create thematic break
             const hr = try Node.create(self.arena_allocator, .thematic_break);
             hr.start_line = self.line_number;
@@ -463,27 +566,40 @@ pub const BlockParser = struct {
     }
 
     fn parseSetextHeading(self: *BlockParser, line: []const u8) !bool {
-        var s = line;
-        s = utils.trimLeft(s);
+        // Setext headings don't work via lazy continuation
+        if (self.is_lazy_continuation) {
+            return false;
+        }
 
+        // Setext heading underlines can only have 0-3 spaces of indentation
+        // Since we've already stripped up to 3 spaces, if there's leading whitespace,
+        // it means there were 4+ spaces
+        if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) {
+            return false;
+        }
+
+        const s = line;
         if (s.len == 0) return false;
 
         const ch = s[0];
         if (ch != '=' and ch != '-') return false;
 
-        // Check if all remaining characters are the same (= or -)
-        for (s) |c| {
-            if (c != ch and c != ' ' and c != '\t') {
-                return false;
-            }
-        }
-
-        // Must have at least one = or -
+        // Check if all characters are marker, followed by optional trailing whitespace
+        // Once we see whitespace, we can only see whitespace (no more markers)
+        var seen_whitespace = false;
         var has_marker = false;
         for (s) |c| {
             if (c == ch) {
+                if (seen_whitespace) {
+                    // Markers after whitespace are not allowed
+                    return false;
+                }
                 has_marker = true;
-                break;
+            } else if (c == ' ' or c == '\t') {
+                seen_whitespace = true;
+            } else {
+                // Invalid character
+                return false;
             }
         }
 
@@ -503,9 +619,14 @@ pub const BlockParser = struct {
     }
 
     fn parseAtxHeading(self: *BlockParser, line: []const u8) !bool {
-        var s = line;
-        s = utils.trimLeft(s);
+        // ATX headings can only have 0-3 spaces of indentation
+        // Since we've already stripped up to 3 spaces, if there's leading whitespace,
+        // it means there were 4+ spaces
+        if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) {
+            return false;
+        }
 
+        var s = line;
         if (s.len == 0 or s[0] != '#') return false;
 
         // Count leading # characters
@@ -739,9 +860,11 @@ pub const BlockParser = struct {
 
         // Check for unordered list marker: -, +, or *
         if (ch == '-' or ch == '+' or ch == '*') {
-            // Must be followed by at least one space/tab
-            if (line.len < 2) return false;
-            if (line[1] != ' ' and line[1] != '\t') return false;
+            // Must be followed by at least one space/tab, or end of line
+            if (line.len >= 2) {
+                if (line[1] != ' ' and line[1] != '\t') return false;
+            }
+            // If line.len == 1, it's just the marker (empty list item), which is valid
 
             marker_type = .bullet;
             bullet_char = ch;
@@ -755,6 +878,8 @@ pub const BlockParser = struct {
                 if (c >= '0' and c <= '9') {
                     num_val = num_val * 10 + (c - '0');
                     num_end = i + 1;
+                    // Per CommonMark spec, start numbers must be <= 999999999
+                    if (num_val > 999999999) return false;
                 } else {
                     break;
                 }
@@ -765,10 +890,12 @@ pub const BlockParser = struct {
             const delim = line[num_end];
             if (delim != '.' and delim != ')') return false;
 
-            // Must be followed by at least one space/tab
-            if (num_end + 1 >= line.len) return false;
-            const after = line[num_end + 1];
-            if (after != ' ' and after != '\t') return false;
+            // Must be followed by at least one space/tab, or end of line
+            if (num_end + 1 < line.len) {
+                const after = line[num_end + 1];
+                if (after != ' ' and after != '\t') return false;
+            }
+            // If num_end + 1 >= line.len, it's just the marker (empty list item), which is valid
 
             marker_type = .ordered;
             delimiter = delim;
@@ -802,12 +929,16 @@ pub const BlockParser = struct {
             }
         }
 
-        // Content indent is marker width + spaces after marker (max 4 total spaces after marker)
-        // Plus any indentation that was already stripped before calling parseListItem
-        const content_indent = self.offset + marker_width + @min(spaces_after_marker, 4);
-
         // Get the actual content
         const content = if (content_start < line.len) line[content_start..] else "";
+
+        // Content indent calculation:
+        // If there's no content on this line, use marker + 1 space as the required indentation
+        // Otherwise, use marker + all spaces consumed (up to 4 after the required space)
+        const content_indent = if (content.len == 0)
+            self.offset + marker_width
+        else
+            self.offset + marker_width + @min(spaces_after_marker, 4);
 
         // Close paragraph if open
         if (self.tip.type == .paragraph) {
@@ -865,6 +996,14 @@ pub const BlockParser = struct {
 
         // Add content if present
         if (content.len > 0) {
+            // Check if content is a thematic break
+            // Thematic breaks are special-cased because they can appear on the first line
+            if (try self.parseThematicBreak(content)) {
+                // Thematic break was created, tip was updated by parseThematicBreak
+                return true;
+            }
+
+            // Create paragraph for content
             const para = try Node.create(self.arena_allocator, .paragraph);
             para.start_line = self.line_number;
             item.appendChild(para);
@@ -890,17 +1029,17 @@ pub const BlockParser = struct {
         const html_type = detectHtmlBlockType(line);
         if (html_type == 0) return false;
 
-        // Create HTML block
+        // Create HTML block - use the original line with indentation
         const html_block = try Node.create(self.arena_allocator, .html_block);
         html_block.start_line = self.line_number;
-        html_block.literal = try self.arena_allocator.dupe(u8, line);
+        html_block.literal = try self.arena_allocator.dupe(u8, self.current_line_remaining);
         self.tip.appendChild(html_block);
         self.tip = html_block;
 
         self.in_html_block = true;
         self.html_block_type = html_type;
 
-        // Check if block ends on same line
+        // Check if block ends on same line (use stripped version for detection)
         if (self.checkHtmlBlockEnd(line)) {
             self.in_html_block = false;
             self.tip = self.tip.parent.?;
@@ -1107,6 +1246,10 @@ pub const BlockParser = struct {
             },
             6 => {
                 // Ends on blank line
+                return utils.isBlankLine(line);
+            },
+            7 => {
+                // Type 7 ends on blank line
                 return utils.isBlankLine(line);
             },
             else => return false,

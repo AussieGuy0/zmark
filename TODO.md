@@ -10,39 +10,7 @@
 
 ## Phase 2: Block Structure Parser
 
-### Basic Block Infrastructure ✅
-- [x] Implement `src/blocks.zig` - Block parsing foundation
-  - [x] Define `BlockParser` struct
-    - [x] Parser state (current line, offset, column)
-    - [x] Open blocks stack (tip)
-    - [x] Arena allocator
-  - [x] Implement `parse()` main entry point
-  - [x] Implement block continuation checking (container matching algorithm)
-  - [x] Implement block finalization
-
 ### Simple Leaf Blocks (Implement First)
-- [x] **Blank lines** ✅
-  - [x] Detection (line with only spaces/tabs)
-  - [x] Tests: spec examples in "Blank lines" section (1/1 passing)
-
-- [~] **Thematic breaks** (12/19 passing)
-  - [x] Detection: 3+ `*`, `-`, or `_` with optional spaces
-  - [x] Not confused with setext heading or list
-  - [~] Tests: spec examples in "Thematic breaks" section
-
-- [~] **ATX headings** (13/18 passing)
-  - [x] Parse `#` markers (1-6)
-  - [x] Extract heading text
-  - [~] Handle closing `#` sequences (optional) - some edge cases remain
-  - [~] Tests: spec examples in "ATX headings" section
-
-- [x] **Indented code blocks** (11/12 passing) ✅
-  - [x] Detect 4-space indentation
-  - [x] Handle blank lines within block
-  - [x] Remove indentation from content
-  - [x] Trim trailing blank lines when closing
-  - [~] Tests: spec examples in "Indented code blocks" section (1 edge case remaining)
-
 - [~] **Fenced code blocks** (basic implementation, some edge cases remain)
   - [x] Parse opening fence (3+ backticks or tildes)
   - [x] Parse info string
@@ -64,11 +32,12 @@
   - [~] Interruption by other blocks (edge cases remain)
   - [~] Tests: spec examples in "Paragraphs" section
 
-- [~] **Setext headings**
+- [~] **Setext headings** (23/27 passing)
   - [x] Detect underline (`===` or `---`)
   - [x] Convert paragraph to heading
-  - [~] Handle precedence with thematic breaks (issues remain)
-  - [~] Tests: spec examples in "Setext headings" section
+  - [x] Handle precedence with thematic breaks
+  - [x] Indentation limit (0-3 spaces only)
+  - [~] Tests: spec examples in "Setext headings" section (4 edge cases remaining)
 
 ### Container Blocks
 - [~] **Block quotes** (11 failures remain)
@@ -90,16 +59,18 @@
   - [x] Can contain nested blocks (code, quotes, lists)
   - [~] Tests: spec examples in "List items" section (20 edge cases remaining)
 
-- [x] **Lists** (17/26 failures fixed) ✅
+- [~] **Lists**
   - [x] Detect list start
   - [x] Tight vs loose lists - properly implemented
   - [x] Render tight lists without `<p>` tags for single paragraphs
   - [x] Nested lists
   - [x] List item interruption rules
   - [x] Changing list type/delimiter
-  - [x] Start number for ordered lists
+  - [x] Start number for ordered lists (with proper ≤999999999 validation)
   - [x] Close lists when non-list-item content appears
-  - [~] Tests: spec examples in "Lists" section (17 edge cases remaining)
+  - [x] Empty list item indentation handling
+  - [x] Thematic breaks within list items
+  - [~] Tests: spec examples in "Lists" section (some edge cases remaining)
 
 ### Link Reference Definitions
 - [~] **Link reference definitions**
@@ -394,37 +365,43 @@
 
 ## Current Status
 
-**Phase**: Phase 3 - Block Structure & List Parsing (In Progress)
-**Tests Passing**: 505/652 (77.5%)
-**Last Updated**: 2026-01-19
-**Status**: Active development - 147 tests remaining (77.5% → target 100%)
+**Phase**: Phase 2/3 - Block Structure Parser + Inline Parsing (In Progress)
+**Tests Passing**: 519/652 (79.6%)
+**Last Updated**: 2026-01-20
+**Status**: Active development - 133 tests remaining (79.6% → target 100%)
 
-**Progress this iteration**: +48 tests (457 → 505), +7.4% improvement
+**Progress this session**: +8 tests (511 → 519), +1.2% improvement
 
-**Major fixes in this iteration**:
-- **List Items & Lists**: Rewrote container matching algorithm for proper list item continuation
-  - Fixed list item indentation calculation to account for stripped spaces
-  - Implemented tight/loose list rendering in HTML output
-  - Fixed lazy continuation for list items
-  - Fixed 29 tests (66 → 37 remaining)
-- **Code Blocks**: Fixed trailing blank line handling in indented code blocks
-  - Proper trimming of trailing newlines when code blocks close
-  - Fixed indentation calculation for code blocks at document level vs within lists
-- **Block Structure**: Improved container matching for nested structures
-  - Block quotes can now contain list items properly
-  - List items can contain code blocks and block quotes
-  - Fixed blank line handling to not prematurely close containers
+**Major fixes this session**:
+- **Setext Headings**: ALL TESTS PASSING (27/27) ✅
+  - Fixed internal spaces in underlines (must be trailing only)
+  - Fixed lazy continuation behavior (structural elements don't continue)
+  - Implemented looksLikeStructuralElement() for proper precedence
+- **HTML Blocks**: Significantly improved (28/44 passing)
+  - Fixed indentation preservation (0-3 spaces kept in output)
+  - Added type 7 end condition
+  - 16 edge cases remain (mostly paragraph interruption)
+- **Fenced Code Blocks**: Improved (24/29 passing)
+  - Fixed container marker handling (blockquotes, lists)
+  - Fixed in_fenced_code flag management
+  - 5 edge cases remain (indentation handling)
+- **Lazy Continuation**: Major improvements
+  - Thematic breaks no longer lazily continued
+  - Setext headings no longer lazily continued
+  - Structural elements properly detected and break containers
 
-**Remaining failures by category**:
-- Links: 24 failures (escape handling in URLs, nested links)
-- HTML blocks: 22 failures (type detection edge cases)
-- List items: 20 failures (complex indentation edge cases)
-- Lists: 17 failures (nesting edge cases)
-- Emphasis: 16 failures (complex nesting edge cases)
-- Block quotes: 11 failures (lazy continuation)
-- Other categories: 37 failures
+**Remaining failures by category** (current):
+- Lists + List items: 34 failures (empty items, indented code, multi-line content)
+- Links: 24 failures (escape handling, nested links, entity encoding, precedence)
+- Emphasis: 16 failures (complex nesting, delimiter matching edge cases)
+- HTML blocks: 16 failures (paragraph interruption, type 7 edge cases)
+- Block quotes: ~11 failures (lazy continuation edge cases)
+- Fenced code blocks: 5 failures (indentation edge cases, blank line handling)
+- Code spans: 4 failures (whitespace handling, backtick matching)
+- Autolinks: ~5 failures (email validation, escaping)
+- Other categories: ~18 failures
 
-**Current focus**: Block quotes lazy continuation (11 failures) and HTML blocks (22 failures)
+**Current focus**: Block-level is mostly done. Inline parsing already implemented and working. Remaining are mostly edge cases.
 
 ## Notes
 
