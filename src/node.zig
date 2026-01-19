@@ -65,6 +65,12 @@ pub const Node = struct {
 
     // List item content indentation (spaces needed for content to be part of item)
     indent: usize = 0,
+    // Track if list item is empty (has no content on first line)
+    is_empty_item: bool = false,
+    // Track if we've seen a blank line after this list item started
+    seen_blank_after_item: bool = false,
+    // Track if this list item had trailing blank lines (for loose list detection)
+    has_trailing_blank: bool = false,
 
     // Source location
     start_line: usize = 0,

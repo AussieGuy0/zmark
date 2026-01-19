@@ -30,6 +30,8 @@ pub const BlockParser = struct {
     current_line_remaining: []const u8,
     // Track if current line is a lazy continuation (no container markers)
     is_lazy_continuation: bool,
+    // Track if we've seen a blank line at the list level (between items)
+    blank_line_before_next_item: bool,
 
     const PartialRefDef = struct {
         label: []const u8,
@@ -64,6 +66,7 @@ pub const BlockParser = struct {
             .partial_refdef = null,
             .current_line_remaining = "",
             .is_lazy_continuation = false,
+            .blank_line_before_next_item = false,
         };
     }
 
@@ -153,6 +156,16 @@ pub const BlockParser = struct {
             if (self.tip.type == .paragraph) {
                 self.tip = self.tip.parent.?;
             }
+
+            // Mark empty list items as having seen a blank line
+            if (self.tip.type == .list_item and self.tip.is_empty_item) {
+                self.tip.seen_blank_after_item = true;
+            }
+
+            // Mark list items with trailing blanks
+            if (self.tip.type == .list_item) {
+                self.tip.has_trailing_blank = true;
+            }
         }
 
         // Match existing containers (block quotes, list items)
@@ -189,6 +202,12 @@ pub const BlockParser = struct {
         }
 
         self.last_matched_container = matched_container;
+
+        // Track blank lines at list level (between items) - makes list loose
+        // This must be after closing unmatched containers
+        if (is_blank and self.tip.type == .list) {
+            self.blank_line_before_next_item = true;
+        }
 
         // Get remaining line content after container markers
         const remaining = if (current_offset < line.len) line[current_offset..] else "";
@@ -411,6 +430,11 @@ pub const BlockParser = struct {
                 return true;
             },
             .list_item => {
+                // Empty list items that have seen a blank line can't continue
+                if (container.is_empty_item and container.seen_blank_after_item) {
+                    return false;
+                }
+
                 // Blank lines always match list items (they can be part of the item)
                 if (is_blank) return true;
 
@@ -422,6 +446,28 @@ pub const BlockParser = struct {
                     // Consume the required indentation
                     offset.* += utils.skipSpaces(line[offset.*..], item_indent);
                     return true;
+                }
+
+                // Check for lazy continuation
+                // Lazy continuation only works if we're currently in a paragraph
+                // and the line doesn't look like a structural element
+                if (self.tip.type == .paragraph) {
+                    // Check if line looks like a structural element that would interrupt the paragraph
+                    const remaining_line = if (offset.* < line.len) line[offset.*..] else "";
+                    if (looksLikeStructuralElement(remaining_line)) {
+                        return false;
+                    }
+
+                    var check = self.tip.parent;
+                    while (check) |node| {
+                        if (node == container) {
+                            // We're in a paragraph inside this list item
+                            // Allow lazy continuation (don't consume anything)
+                            self.is_lazy_continuation = true;
+                            return true;
+                        }
+                        check = node.parent;
+                    }
                 }
 
                 return false;
@@ -857,14 +903,17 @@ pub const BlockParser = struct {
         var bullet_char: u8 = 0;
         var delimiter: u8 = 0;
         var start_num: u32 = 1;
+        var is_empty: bool = false;
 
         // Check for unordered list marker: -, +, or *
         if (ch == '-' or ch == '+' or ch == '*') {
             // Must be followed by at least one space/tab, or end of line
             if (line.len >= 2) {
                 if (line[1] != ' ' and line[1] != '\t') return false;
+            } else {
+                // line.len == 1, it's just the marker (empty list item)
+                is_empty = true;
             }
-            // If line.len == 1, it's just the marker (empty list item), which is valid
 
             marker_type = .bullet;
             bullet_char = ch;
@@ -894,14 +943,21 @@ pub const BlockParser = struct {
             if (num_end + 1 < line.len) {
                 const after = line[num_end + 1];
                 if (after != ' ' and after != '\t') return false;
+            } else {
+                // num_end + 1 >= line.len, it's just the marker (empty list item)
+                is_empty = true;
             }
-            // If num_end + 1 >= line.len, it's just the marker (empty list item), which is valid
 
             marker_type = .ordered;
             delimiter = delim;
             start_num = num_val;
             marker_end = num_end + 1;
         } else {
+            return false;
+        }
+
+        // Empty list items cannot interrupt a paragraph
+        if (is_empty and self.tip.type == .paragraph) {
             return false;
         }
 
@@ -948,6 +1004,14 @@ pub const BlockParser = struct {
         // Create or find list
         var list_node: *Node = undefined;
         if (self.tip.type == .list) {
+            // Check if previous item (last child) had trailing blanks
+            var previous_item_had_trailing_blank = false;
+            if (self.tip.last_child) |last_item| {
+                if (last_item.type == .list_item and last_item.has_trailing_blank) {
+                    previous_item_had_trailing_blank = true;
+                }
+            }
+
             const list_data = self.tip.list_data orelse return error.MissingListData;
             const matches = if (marker_type == .bullet)
                 list_data.type == .bullet and list_data.bullet_char == bullet_char
@@ -957,6 +1021,11 @@ pub const BlockParser = struct {
             if (matches) {
                 // Continue existing list
                 list_node = self.tip;
+                // If we saw a blank line before this item, make the list loose
+                if (self.blank_line_before_next_item or previous_item_had_trailing_blank) {
+                    list_node.list_data.?.tight = false;
+                    self.blank_line_before_next_item = false;
+                }
             } else {
                 // Different list type, close and create new
                 self.tip = self.tip.parent.?;
@@ -971,6 +1040,7 @@ pub const BlockParser = struct {
                     .padding = 1,
                 };
                 self.tip.appendChild(list_node);
+                self.blank_line_before_next_item = false;
             }
         } else {
             // Create new list
@@ -985,12 +1055,14 @@ pub const BlockParser = struct {
                 .padding = 1,
             };
             self.tip.appendChild(list_node);
+            self.blank_line_before_next_item = false;
         }
 
         // Create list item with proper indent
         const item = try Node.create(self.arena_allocator, .list_item);
         item.start_line = self.line_number;
         item.indent = content_indent;
+        item.is_empty_item = (content.len == 0); // Mark as empty if no content on first line
         list_node.appendChild(item);
         self.tip = item;
 

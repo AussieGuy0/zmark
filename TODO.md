@@ -366,13 +366,20 @@
 ## Current Status
 
 **Phase**: Phase 2/3 - Block Structure Parser + Inline Parsing (In Progress)
-**Tests Passing**: 519/652 (79.6%)
+**Tests Passing**: 531/652 (81.4%)
 **Last Updated**: 2026-01-20
-**Status**: Active development - 133 tests remaining (79.6% → target 100%)
+**Status**: Active development - 121 tests remaining (81.4% → target 100%)
 
-**Progress this session**: +8 tests (511 → 519), +1.2% improvement
+**Progress this session**: +20 tests (511 → 531), +3.1% improvement
 
 **Major fixes this session**:
+- **Lists + List items**: MAJOR IMPROVEMENTS ✅
+  - Implemented lazy continuation for list items (like block quotes)
+  - Fixed empty list item handling (can't interrupt paragraphs)
+  - Added blank line tracking for empty list items
+  - Implemented tight/loose list detection using trailing blank tracking
+  - Fixed tight/loose rendering in HTML output
+  - Reduced failures from ~34 to ~20
 - **Setext Headings**: ALL TESTS PASSING (27/27) ✅
   - Fixed internal spaces in underlines (must be trailing only)
   - Fixed lazy continuation behavior (structural elements don't continue)
@@ -389,19 +396,21 @@
   - Thematic breaks no longer lazily continued
   - Setext headings no longer lazily continued
   - Structural elements properly detected and break containers
+  - List items now support lazy continuation like block quotes
 
 **Remaining failures by category** (current):
-- Lists + List items: 34 failures (empty items, indented code, multi-line content)
-- Links: 24 failures (escape handling, nested links, entity encoding, precedence)
-- Emphasis: 16 failures (complex nesting, delimiter matching edge cases)
-- HTML blocks: 16 failures (paragraph interruption, type 7 edge cases)
+- Lists + List items: ~20 failures (nested structures, complex indentation)
+- Links: ~24 failures (escape handling, nested links, entity encoding, precedence)
+- Emphasis: ~16 failures (complex nesting, delimiter matching edge cases)
+- HTML blocks: ~16 failures (paragraph interruption, type 7 edge cases)
 - Block quotes: ~11 failures (lazy continuation edge cases)
-- Fenced code blocks: 5 failures (indentation edge cases, blank line handling)
-- Code spans: 4 failures (whitespace handling, backtick matching)
+- Fenced code blocks: ~5 failures (indentation edge cases, blank line handling)
+- Code spans: ~4 failures (whitespace handling, backtick matching)
 - Autolinks: ~5 failures (email validation, escaping)
-- Other categories: ~18 failures
+- Tabs: ~3 failures (tab expansion in various contexts)
+- Other categories: ~17 failures
 
-**Current focus**: Block-level is mostly done. Inline parsing already implemented and working. Remaining are mostly edge cases.
+**Current focus**: Block-level mostly working. Next priorities: Links (escape/entity handling), Emphasis (complex nesting), remaining edge cases.
 
 ## Notes
 
