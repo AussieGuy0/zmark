@@ -40,7 +40,10 @@ pub const BlockParser = struct {
         return BlockParser{
             .allocator = allocator,
             .arena_allocator = arena_allocator,
-            .lines = try std.ArrayList([]const u8).initCapacity(allocator, 64),
+            // Important: don't allocate a backing buffer here.
+            // `parse()` assigns `self.lines = splitLines(...)`, and we don't want to leak
+            // an initial buffer by overwriting it without deinit.
+            .lines = .{},
             .line_number = 0,
             .offset = 0,
             .column = 0,

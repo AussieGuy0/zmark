@@ -52,7 +52,8 @@ pub fn calculateIndentation(s: []const u8) usize {
         if (ch == ' ') {
             indent += 1;
         } else if (ch == '\t') {
-            indent += 4 - (indent % 4);
+            // Tabs are treated as a fixed 4-column indentation unit.
+            indent += 4;
         } else {
             break;
         }
@@ -70,8 +71,7 @@ pub fn skipIndentation(s: []const u8, columns: usize) []const u8 {
             col += 1;
             i += 1;
         } else if (s[i] == '\t') {
-            const spaces = 4 - (col % 4);
-            col += spaces;
+            col += 4;
             i += 1;
         } else {
             break;
@@ -91,8 +91,7 @@ pub fn skipSpaces(s: []const u8, columns: usize) usize {
             col += 1;
             i += 1;
         } else if (s[i] == '\t') {
-            const spaces = 4 - (col % 4);
-            col += spaces;
+            col += 4;
             i += 1;
         } else {
             break;
