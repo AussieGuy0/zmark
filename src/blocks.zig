@@ -91,10 +91,7 @@ pub const BlockParser = struct {
         // Process each line
         for (self.lines.items) |line| {
             self.line_number += 1;
-            // Expand tabs before processing
-            const expanded_line = try scanner.expandTabs(self.allocator, line);
-            defer self.allocator.free(expanded_line);
-            try self.incorporateLine(expanded_line);
+            try self.incorporateLine(line);
         }
 
         // Finalize any partial link reference definition
