@@ -6,6 +6,7 @@ const ListType = @import("node.zig").ListType;
 const RefDef = @import("node.zig").RefDef;
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
+const entities = @import("entities.zig");
 
 pub const BlockParser = struct {
     allocator: std.mem.Allocator,
@@ -103,6 +104,9 @@ pub const BlockParser = struct {
                 self.partial_refdef = null;
             }
         }
+
+        // Finalize all code blocks (trim trailing newlines)
+        try self.finalizeCodeBlocks(self.root);
 
         // Close all open blocks
         while (self.tip != self.root) {
@@ -828,9 +832,9 @@ pub const BlockParser = struct {
         code.start_line = self.line_number;
         code.literal = null; // Will be set when first line is added
 
-        // Store info string if present (with backslash escapes processed)
+        // Store info string if present (with backslash escapes and entities processed)
         if (info.len > 0) {
-            const processed_info = try self.processEscapes(info);
+            const processed_info = try self.processEscapesAndEntities(info);
             code.code_info = processed_info;
         }
 
@@ -1218,11 +1222,11 @@ pub const BlockParser = struct {
         while (i < line.len and (isAlphaNum(line[i]) or line[i] == '-')) : (i += 1) {}
 
         // After tag name, we need either whitespace, /, or >
-        // If we see : or + here, it's likely an autolink, not an HTML tag
+        // If we see : or + or @ here, it's likely an autolink, not an HTML tag
         if (i < line.len) {
             const ch = line[i];
-            if (ch == ':' or ch == '+' or ch == '.') {
-                return false; // This is an autolink like <http://...> or <a+b:c>, not an HTML tag
+            if (ch == ':' or ch == '+' or ch == '.' or ch == '@') {
+                return false; // This is an autolink like <http://...>, <foo@bar.com>, not an HTML tag
             }
         }
 
@@ -1342,21 +1346,25 @@ pub const BlockParser = struct {
     fn parseLinkReferenceDefinition(self: *BlockParser, line: []const u8) !bool {
         if (line.len == 0 or line[0] != '[') return false;
 
-        // Find closing ]
+        // Find closing ] (first unescaped ])
+        // According to spec: "ends with the first right bracket (]) that is not backslash-escaped"
         var i: usize = 1;
-        var bracket_depth: usize = 1;
-        while (i < line.len and bracket_depth > 0) : (i += 1) {
-            if (line[i] == '[') {
-                bracket_depth += 1;
-            } else if (line[i] == ']') {
-                bracket_depth -= 1;
-            } else if (line[i] == '\\' and i + 1 < line.len) {
+        var found_close = false;
+        while (i < line.len) : (i += 1) {
+            if (line[i] == '\\' and i + 1 < line.len) {
                 i += 1; // Skip escaped character
+            } else if (line[i] == ']') {
+                found_close = true;
+                i += 1; // Move past the ]
+                break;
+            } else if (line[i] == '[') {
+                // Unescaped [ inside label is not allowed
+                return false;
             }
         }
-        if (bracket_depth != 0) return false;
+        if (!found_close) return false;
 
-        // Extract label (i now points after the closing ])
+        // Extract label (i now points one past the closing ])
         const label = line[1..i-1];
         if (label.len == 0) return false;
 
@@ -1422,18 +1430,22 @@ pub const BlockParser = struct {
 
             // Store complete definition
             const normalized_label = try self.normalizeLabel(label);
-            const processed_url = try self.processEscapes(url);
-            const processed_title = if (title_result.title) |t| try self.processEscapes(t) else null;
+            const processed_url = try self.processEscapesAndEntities(url);
+            const processed_title = if (title_result.title) |t| try self.processEscapesAndEntities(t) else null;
             const ref_def = RefDef{
                 .url = processed_url,
                 .title = processed_title,
             };
-            try self.refmap.put(normalized_label, ref_def);
+            // Only add if not already present (first definition wins)
+            const gop = try self.refmap.getOrPut(normalized_label);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = ref_def;
+            }
             return true;
         } else if (title_result.started) {
             // Title started but not complete - need more lines
             const normalized_label = try self.normalizeLabel(label);
-            const processed_url = try self.processEscapes(url);
+            const processed_url = try self.processEscapesAndEntities(url);
             self.partial_refdef = PartialRefDef{
                 .label = normalized_label,
                 .url = processed_url,
@@ -1692,7 +1704,11 @@ pub const BlockParser = struct {
                 .url = url,
                 .title = null,
             };
-            try self.refmap.put(partial.label, ref_def);
+            // Only add if not already present (first definition wins)
+            const gop = try self.refmap.getOrPut(partial.label);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = ref_def;
+            }
         }
 
         partial.accumulated.deinit(self.allocator);
@@ -1703,12 +1719,16 @@ pub const BlockParser = struct {
         var partial = &self.partial_refdef.?;
 
         if (partial.url) |url| {
-            const processed_title = if (title) |t| try self.processEscapes(t) else null;
+            const processed_title = if (title) |t| try self.processEscapesAndEntities(t) else null;
             const ref_def = RefDef{
                 .url = url,
                 .title = processed_title,
             };
-            try self.refmap.put(partial.label, ref_def);
+            // Only add if not already present (first definition wins)
+            const gop = try self.refmap.getOrPut(partial.label);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = ref_def;
+            }
         }
 
         partial.accumulated.deinit(self.allocator);
@@ -1724,16 +1744,8 @@ pub const BlockParser = struct {
         while (i < label.len) : (i += 1) {
             const ch = label[i];
 
-            // Handle backslash escapes
-            if (ch == '\\' and i + 1 < label.len) {
-                const next = label[i + 1];
-                if (scanner.isAsciiPunctuation(next)) {
-                    try result.append(self.allocator, std.ascii.toLower(next));
-                    in_whitespace = false;
-                    i += 1; // Skip the escaped character
-                    continue;
-                }
-            }
+            // According to CommonMark spec, backslash escapes are NOT processed during label normalization
+            // Only case-folding, whitespace collapsing, and trimming are performed
 
             if (ch == ' ' or ch == '\t' or ch == '\n') {
                 if (!in_whitespace) {
@@ -1776,5 +1788,65 @@ pub const BlockParser = struct {
         }
 
         return self.arena_allocator.dupe(u8, result.items);
+    }
+
+    // Process both backslash escapes and HTML entities in a string
+    // Used for URLs and titles in link reference definitions
+    fn processEscapesAndEntities(self: *BlockParser, text: []const u8) ![]const u8 {
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, text.len);
+        defer result.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < text.len) {
+            // Process backslash escapes first
+            if (text[i] == '\\' and i + 1 < text.len and scanner.isAsciiPunctuation(text[i + 1])) {
+                try result.append(self.allocator, text[i + 1]);
+                i += 2;
+                continue;
+            }
+
+            // Process HTML entities
+            if (text[i] == '&') {
+                if (entities.decodeEntity(text, i)) |decoded| {
+                    try result.appendSlice(self.allocator, decoded.str);
+                    i += decoded.len;
+                    continue;
+                }
+            }
+
+            try result.append(self.allocator, text[i]);
+            i += 1;
+        }
+
+        return self.arena_allocator.dupe(u8, result.items);
+    }
+
+    // Recursively finalize all code blocks in the tree
+    fn finalizeCodeBlocks(self: *BlockParser, node: *Node) !void {
+        // Process children first
+        var child = node.first_child;
+        while (child) |c| {
+            try self.finalizeCodeBlocks(c);
+            child = c.next;
+        }
+
+        // Trim trailing blank lines from code blocks
+        // The spec says to remove trailing blank lines
+        // But we need to be careful: a line with only spaces is NOT blank
+        if (node.type == .code_block) {
+            if (node.literal) |lit| {
+                // Find the last non-newline character
+                var last_content: usize = 0;
+                for (lit, 0..) |ch, i| {
+                    if (ch != '\n') {
+                        last_content = i + 1; // Position after this char
+                    }
+                }
+                // Strip everything after the last content character
+                // But the content might end with a newline that should be preserved
+                // Actually, the HTML renderer adds a newline, so we should not include trailing newlines
+                node.literal = lit[0..last_content];
+            }
+        }
     }
 };

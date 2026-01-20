@@ -244,26 +244,20 @@ pub const HtmlRenderer = struct {
 
     fn encodeUrl(self: *HtmlRenderer, s: []const u8) !void {
         for (s) |ch| {
-            // Encode characters that need percent-encoding or HTML escaping
-            if (ch >= 0x80 or // Non-ASCII
-                ch <= 0x20 or // Control chars and space
-                ch == '<' or ch == '>' or ch == '"' or ch == '\\' or
-                ch == '{' or ch == '}' or ch == '|' or ch == '^' or ch == '`')
+            // HTML special characters use HTML entities in href attribute
+            if (ch == '&') {
+                try self.buffer.appendSlice(self.allocator,"&amp;");
+            } else if (ch >= 0x80 or // Non-ASCII (UTF-8 continuation bytes)
+                       ch <= 0x20 or // Control chars and space
+                       ch == '<' or ch == '>' or ch == '"' or ch == '\\' or
+                       ch == '[' or ch == ']' or
+                       ch == '{' or ch == '}' or ch == '|' or ch == '^' or ch == '`')
             {
-                // Special HTML entities first
-                switch (ch) {
-                    '&' => try self.buffer.appendSlice(self.allocator,"&amp;"),
-                    '<' => try self.buffer.appendSlice(self.allocator,"&lt;"),
-                    '>' => try self.buffer.appendSlice(self.allocator,"&gt;"),
-                    '"' => try self.buffer.appendSlice(self.allocator,"&quot;"),
-                    else => {
-                        // Percent-encode everything else
-                        const hex = "0123456789ABCDEF";
-                        try self.buffer.append(self.allocator,'%');
-                        try self.buffer.append(self.allocator,hex[ch >> 4]);
-                        try self.buffer.append(self.allocator,hex[ch & 0x0F]);
-                    }
-                }
+                // Percent-encode other special chars
+                const hex = "0123456789ABCDEF";
+                try self.buffer.append(self.allocator,'%');
+                try self.buffer.append(self.allocator,hex[ch >> 4]);
+                try self.buffer.append(self.allocator,hex[ch & 0x0F]);
             } else {
                 try self.buffer.append(self.allocator,ch);
             }

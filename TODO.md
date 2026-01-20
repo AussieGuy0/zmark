@@ -366,51 +366,89 @@
 ## Current Status
 
 **Phase**: Phase 2/3 - Block Structure Parser + Inline Parsing (In Progress)
-**Tests Passing**: 531/652 (81.4%)
-**Last Updated**: 2026-01-20
-**Status**: Active development - 121 tests remaining (81.4% → target 100%)
+**Tests Passing**: 570/652 (87.4%)
+**Last Updated**: 2026-01-20 (Ralph Loop Iteration 2)
+**Status**: Active development - 82 tests remaining (87.4% → target 100%)
 
-**Progress this session**: +20 tests (511 → 531), +3.1% improvement
+**Progress Ralph Loop Iteration 2**: +13 tests (557 → 570), HTML blocks fix
+**Total Ralph Loop Progress**: +24 tests (546 → 570), +3.7% improvement
 
-**Major fixes this session**:
-- **Lists + List items**: MAJOR IMPROVEMENTS ✅
-  - Implemented lazy continuation for list items (like block quotes)
-  - Fixed empty list item handling (can't interrupt paragraphs)
-  - Added blank line tracking for empty list items
-  - Implemented tight/loose list detection using trailing blank tracking
-  - Fixed tight/loose rendering in HTML output
-  - Reduced failures from ~34 to ~20
-- **Setext Headings**: ALL TESTS PASSING (27/27) ✅
-  - Fixed internal spaces in underlines (must be trailing only)
-  - Fixed lazy continuation behavior (structural elements don't continue)
-  - Implemented looksLikeStructuralElement() for proper precedence
-- **HTML Blocks**: Significantly improved (28/44 passing)
-  - Fixed indentation preservation (0-3 spaces kept in output)
-  - Added type 7 end condition
-  - 16 edge cases remain (mostly paragraph interruption)
-- **Fenced Code Blocks**: Improved (24/29 passing)
-  - Fixed container marker handling (blockquotes, lists)
-  - Fixed in_fenced_code flag management
-  - 5 edge cases remain (indentation handling)
-- **Lazy Continuation**: Major improvements
-  - Thematic breaks no longer lazily continued
-  - Setext headings no longer lazily continued
-  - Structural elements properly detected and break containers
-  - List items now support lazy continuation like block quotes
+**Breakdown of remaining 82 failures**:
+- Emphasis and strong emphasis: 16 failures (delimiter algorithm, UTF-8)
+- List items: 14 failures (indentation, tight/loose detection)
+- Links: 11 failures (precedence, nested links)
+- HTML blocks: 9 failures (was 16, fixed 11 with newline! ✅)
+- Lists: 9 failures (related to list items)
+- Block quotes: 6 failures (lazy continuation rules)
+- Link reference definitions: 5 failures (multiline, Unicode case-folding)
+- Raw HTML: 5 failures (tag validation edge cases)
+- Tabs: 4 failures (expansion in nested structures)
+- Autolinks: 2 failures (backslash escapes in parseRawHtml)
+- Images: 1 failure
+- Others: various edge cases
 
-**Remaining failures by category** (current):
-- Lists + List items: ~20 failures (nested structures, complex indentation)
-- Links: ~24 failures (escape handling, nested links, entity encoding, precedence)
-- Emphasis: ~16 failures (complex nesting, delimiter matching edge cases)
-- HTML blocks: ~16 failures (paragraph interruption, type 7 edge cases)
-- Block quotes: ~11 failures (lazy continuation edge cases)
-- Fenced code blocks: ~5 failures (indentation edge cases, blank line handling)
-- Code spans: ~4 failures (whitespace handling, backtick matching)
-- Autolinks: ~5 failures (email validation, escaping)
-- Tabs: ~3 failures (tab expansion in various contexts)
-- Other categories: ~17 failures
+**Major fixes Ralph Loop Iteration 2**:
+- **HTML Blocks**: MAJOR FIX! ✅ (+13 tests, now 39/44 passing)
+  - Fixed missing trailing newline after HTML blocks
+  - Simple one-line fix with big impact
 
-**Current focus**: Block-level mostly working. Next priorities: Links (escape/entity handling), Emphasis (complex nesting), remaining edge cases.
+**Major fixes Ralph Loop Iteration 1**:
+- **Code Spans**: FIXED ✅ (22/22 passing)
+  - Fixed precedence over links (code spans parsed first)
+  - Fixed backtick run handling (don't re-parse after failed match)
+  - Fixed code span detection in link text bracket matching
+- **Link Reference Definitions**: MAJOR IMPROVEMENTS ✅
+  - Fixed duplicate definitions (first definition wins, not last)
+  - Fixed backslash escape handling in labels (no processing during normalization)
+  - Fixed unescaped bracket validation (reject labels with unescaped `[`)
+- **Links & Entity Encoding**: IMPROVEMENTS ✅
+  - Implemented HTML entity decoding in URLs and titles (`&ouml;` → `ö`)
+  - Added percent-encoding of decoded entities for href attributes
+  - Fixed backslash escape handling in angle-bracket URLs (`\>` invalidates URL)
+  - Fixed backslash escape handling in bare URLs (escaped parens don't count for balancing)
+  - Created `processEscapesAndEntities()` for proper URL/title processing
+  - Reduced Link failures from 24 to 17
+- **Code Spans**: Fixed ✅
+  - Fixed whitespace handling to only convert line endings, not collapse spaces
+  - Created `convertLineEndingsToSpaces()` instead of using `collapseWhitespace()`
+  - Fixed space stripping rule: only strip if content doesn't consist entirely of spaces
+  - Reduced Code spans failures from 4 to 2
+- **Code Blocks**: Fixed ✅
+  - Added `finalizeCodeBlocks()` to trim trailing blank lines
+  - Fixed indented code block rendering by stripping trailing newlines
+  - Fixed to preserve lines with spaces (not blank)
+  - Reduced Indented code block failures to 0
+- **Entity References**: Fixed ✅
+  - Fixed info string processing in fenced code blocks to decode entities
+  - Updated to use `processEscapesAndEntities()` for code info strings
+  - Reduced failures from 2 to 1 (remaining is raw HTML)
+- **Autolinks**: Improved ✅
+  - Fixed URL encoding to use `&amp;` instead of `%26` for ampersands in href
+  - Added `[` and `]` to percent-encoding list
+  - Reduced failures from 6 to 4
+- **URL Encoding**: Fixed ✅
+  - Updated `encodeUrl()` to use HTML entities (`&amp;`) for `&` in href attributes
+  - Added percent-encoding for `[`, `]` brackets
+  - Properly percent-encode UTF-8 bytes (non-ASCII characters)
+
+**Remaining failures by category** (current - 106 total):
+- Links: 17 failures (nested links, invalid cases, parsing precedence)
+- HTML blocks: 16 failures (final newlines, paragraph interruption)
+- Emphasis: 16 failures (complex nesting, delimiter matching, Unicode punctuation)
+- List items: 14 failures (tight/loose detection with blank lines, complex nesting)
+- Lists: 9 failures (nested structures, edge cases)
+- Link reference definitions: 6 failures (invalid definitions, blank lines in titles)
+- Block quotes: 6 failures (lazy continuation edge cases)
+- Raw HTML: 5 failures (tag validation, output normalization)
+- Fenced code blocks: 4 failures (indentation handling, blank line preservation)
+- Autolinks: 4 failures (email validation, special char handling)
+- Tabs: 4 failures (tab expansion in code blocks within lists)
+- Code spans: 2 failures (parsing precedence with links, backtick matching)
+- Images: 1 failure (invalid nested brackets `[[foo]]`)
+- Entity references: 1 failure (raw HTML context)
+- Backslash escapes: 1 failure (raw HTML context)
+
+**Current focus**: Systematically fixing edge cases. No category has overwhelming failures - all are manageable!
 
 ## Notes
 

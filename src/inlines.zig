@@ -9,12 +9,14 @@ pub const InlineParser = struct {
     allocator: std.mem.Allocator,
     arena_allocator: std.mem.Allocator,
     refmap: *const std.StringHashMap(RefDef),
+    inside_link: bool, // Track if we're parsing inside a link (no nested links allowed)
 
     pub fn init(allocator: std.mem.Allocator, arena_allocator: std.mem.Allocator, refmap: *const std.StringHashMap(RefDef)) InlineParser {
         return InlineParser{
             .allocator = allocator,
             .arena_allocator = arena_allocator,
             .refmap = refmap,
+            .inside_link = false,
         };
     }
 
@@ -457,6 +459,132 @@ pub const InlineParser = struct {
         while (pos < text.len) {
             const ch = text[pos];
 
+            // Check for code span (HIGHEST PRECEDENCE)
+            if (ch == '`') {
+                // Count backticks
+                var backtick_count: usize = 0;
+                var i = pos;
+                while (i < text.len and text[i] == '`') {
+                    backtick_count += 1;
+                    i += 1;
+                }
+
+                // Look for closing backticks
+                var close_pos: ?usize = null;
+                var j = i;
+                while (j < text.len) {
+                    if (text[j] == '`') {
+                        var close_count: usize = 0;
+                        var k = j;
+                        while (k < text.len and text[k] == '`') {
+                            close_count += 1;
+                            k += 1;
+                        }
+                        if (close_count == backtick_count) {
+                            close_pos = j;
+                            break;
+                        }
+                        j = k;
+                    } else {
+                        j += 1;
+                    }
+                }
+
+                if (close_pos) |cp| {
+                    // Flush any pending text
+                    if (pos > text_start) {
+                        try self.addTextNode(parent, text[text_start..pos]);
+                    }
+
+                    // Create code span
+                    const code_content = text[i..cp];
+                    // Convert line endings to spaces (but don't collapse multiple spaces)
+                    const processed = try self.convertLineEndingsToSpaces(code_content);
+                    defer self.allocator.free(processed);
+
+                    // Trim one space from each end if both present AND content doesn't consist entirely of spaces
+                    var final_content = processed;
+                    if (final_content.len >= 2 and
+                        final_content[0] == ' ' and
+                        final_content[final_content.len - 1] == ' ') {
+                        // Check if it consists entirely of spaces
+                        var all_spaces = true;
+                        for (final_content) |c| {
+                            if (c != ' ') {
+                                all_spaces = false;
+                                break;
+                            }
+                        }
+                        // Only strip if it doesn't consist entirely of spaces
+                        if (!all_spaces) {
+                            final_content = final_content[1 .. final_content.len - 1];
+                        }
+                    }
+
+                    const code_node = try Node.create(self.arena_allocator, .code);
+                    code_node.literal = try self.arena_allocator.dupe(u8, final_content);
+                    parent.appendChild(code_node);
+
+                    pos = cp + backtick_count;
+                    text_start = pos;
+                    continue;
+                } else {
+                    // No matching code span found - treat the entire backtick run as literal text
+                    // Just skip to after all the backticks (they'll be included in pending text)
+                    pos = i;
+                    continue;
+                }
+            }
+
+            // Check for autolink or raw HTML tag (BEFORE links)
+            if (ch == '<') {
+                // Try autolink first
+                if (try self.parseAutolink(text, pos)) |result| {
+                    // Flush any pending text
+                    if (pos > text_start) {
+                        try self.addTextNode(parent, text[text_start..pos]);
+                    }
+
+                    // Create link node
+                    const link_node = try Node.create(self.arena_allocator, .link);
+                    link_node.link_url = result.url;
+                    link_node.link_title = null;
+
+                    // Add URL as text content
+                    // For email autolinks, display just the email (without "mailto:")
+                    const text_node = try Node.create(self.arena_allocator, .text);
+                    if (std.mem.startsWith(u8, result.url, "mailto:")) {
+                        text_node.literal = result.url[7..]; // Skip "mailto:"
+                    } else {
+                        text_node.literal = result.url;
+                    }
+                    link_node.appendChild(text_node);
+
+                    parent.appendChild(link_node);
+
+                    pos += result.len;
+                    text_start = pos;
+                    continue;
+                }
+
+                // Try raw HTML tag
+                if (try self.parseRawHtml(text, pos)) |html_len| {
+                    // Flush any pending text
+                    if (pos > text_start) {
+                        try self.addTextNode(parent, text[text_start..pos]);
+                    }
+
+                    // Create HTML inline node
+                    const html_node = try Node.create(self.arena_allocator, .html_inline);
+                    html_node.literal = try self.arena_allocator.dupe(u8, text[pos..pos + html_len]);
+                    parent.appendChild(html_node);
+
+                    pos += html_len;
+                    text_start = pos;
+                    continue;
+                }
+            }
+
             // Check for emphasis or strong delimiters
             if (ch == '*' or ch == '_') {
                 // Count delimiter run
@@ -509,17 +637,53 @@ pub const InlineParser = struct {
             }
 
             // Check for link or image
-            if (ch == '[' or (ch == '!' and pos + 1 < text.len and text[pos + 1] == '[')) {
+            // Skip link parsing if we're already inside a link (no nested links allowed)
+            if ((ch == '[' or (ch == '!' and pos + 1 < text.len and text[pos + 1] == '[')) and (!self.inside_link or ch == '!')) {
                 const is_image = (ch == '!');
                 const link_start = if (is_image) pos + 1 else pos;
 
                 // Find matching ]
+                // Must skip over code spans and backslash escapes
                 var bracket_depth: usize = 0;
                 var close_bracket: ?usize = null;
                 var j = link_start + 1;
-                while (j < text.len) : (j += 1) {
+                while (j < text.len) {
                     if (text[j] == '\\' and j + 1 < text.len) {
-                        j += 1; // Skip escaped character
+                        j += 2; // Skip escaped character
+                        continue;
+                    }
+                    // Skip code spans
+                    if (text[j] == '`') {
+                        var tick_count: usize = 0;
+                        var k = j;
+                        while (k < text.len and text[k] == '`') {
+                            tick_count += 1;
+                            k += 1;
+                        }
+                        // Look for closing backticks
+                        var found_close = false;
+                        var m = k;
+                        while (m < text.len) {
+                            if (text[m] == '`') {
+                                var close_count: usize = 0;
+                                var n = m;
+                                while (n < text.len and text[n] == '`') {
+                                    close_count += 1;
+                                    n += 1;
+                                }
+                                if (close_count == tick_count) {
+                                    found_close = true;
+                                    j = n;
+                                    break;
+                                }
+                                m = n;
+                            } else {
+                                m += 1;
+                            }
+                        }
+                        if (!found_close) {
+                            j = k; // No closing backticks, skip opening ones
+                        }
                         continue;
                     }
                     if (text[j] == '[') {
@@ -531,6 +695,7 @@ pub const InlineParser = struct {
                         }
                         bracket_depth -= 1;
                     }
+                    j += 1;
                 }
 
                 if (close_bracket) |cb| {
@@ -551,27 +716,51 @@ pub const InlineParser = struct {
                         if (paren_pos < text.len and text[paren_pos] == '<') {
                             url_start = paren_pos + 1;
                             paren_pos += 1;
-                            while (paren_pos < text.len and text[paren_pos] != '>') {
-                                if (text[paren_pos] == '\n') break;
+                            var found_closing = false;
+                            while (paren_pos < text.len) {
+                                if (text[paren_pos] == '\\' and paren_pos + 1 < text.len) {
+                                    // Skip escaped character
+                                    paren_pos += 2;
+                                    continue;
+                                }
+                                if (text[paren_pos] == '\n' or text[paren_pos] == '<') {
+                                    // Invalid - contains newline or <
+                                    break;
+                                }
+                                if (text[paren_pos] == '>') {
+                                    found_closing = true;
+                                    url_end = paren_pos;
+                                    paren_pos += 1;
+                                    break;
+                                }
                                 paren_pos += 1;
                             }
-                            if (paren_pos < text.len and text[paren_pos] == '>') {
-                                url_end = paren_pos;
-                                paren_pos += 1;
-                            } else {
-                                paren_pos = url_start - 1; // Reset
+                            if (!found_closing) {
+                                // Invalid angle-bracket URL, reset and skip
+                                paren_pos = url_start - 1; // Reset to before '<'
                             }
                         } else {
                             // Bare URL
                             var paren_depth: usize = 0;
                             while (paren_pos < text.len) {
                                 const c = text[paren_pos];
+
+                                // Handle backslash escapes
+                                if (c == '\\' and paren_pos + 1 < text.len and scanner.isAsciiPunctuation(text[paren_pos + 1])) {
+                                    // Skip the backslash and the escaped character
+                                    paren_pos += 2;
+                                    continue;
+                                }
+
                                 if (c == '(') {
                                     paren_depth += 1;
                                 } else if (c == ')') {
                                     if (paren_depth == 0) break;
                                     paren_depth -= 1;
                                 } else if (c == ' ' or c == '\t' or c == '\n') {
+                                    break;
+                                } else if (scanner.isControl(c)) {
+                                    // Control characters are not allowed
                                     break;
                                 }
                                 paren_pos += 1;
@@ -622,11 +811,11 @@ pub const InlineParser = struct {
                             const link_text = text[link_start + 1 .. cb];
                             const url = text[url_start..url_end];
 
-                            // Process backslash escapes in URL and title
-                            const processed_url = try self.processEscapes(url);
+                            // Process backslash escapes and HTML entities in URL and title
+                            const processed_url = try self.processEscapesAndEntities(url);
                             defer self.allocator.free(processed_url);
                             const processed_title = if (title) |t| blk: {
-                                const pt = try self.processEscapes(t);
+                                const pt = try self.processEscapesAndEntities(t);
                                 break :blk pt;
                             } else null;
                             defer if (processed_title) |pt| self.allocator.free(pt);
@@ -640,8 +829,11 @@ pub const InlineParser = struct {
                             link_node.link_url = try self.arena_allocator.dupe(u8, processed_url);
                             link_node.link_title = if (processed_title) |pt| try self.arena_allocator.dupe(u8, pt) else null;
 
-                            // Parse link text as inlines
+                            // Parse link text as inlines (set inside_link flag to prevent nesting)
+                            const was_inside_link = self.inside_link;
+                            self.inside_link = true;
                             try self.parseInlines(link_node, link_text);
+                            self.inside_link = was_inside_link;
 
                             parent.appendChild(link_node);
 
@@ -660,14 +852,20 @@ pub const InlineParser = struct {
                         // [text][ref] or [text][]
                         const ref_start = cb + 2;
                         var ref_end = ref_start;
+                        var valid_label = true;
                         while (ref_end < text.len) : (ref_end += 1) {
                             if (text[ref_end] == '\\' and ref_end + 1 < text.len) {
                                 ref_end += 1; // Skip escaped character
                                 continue;
                             }
                             if (text[ref_end] == ']') break;
+                            if (text[ref_end] == '[') {
+                                // Unescaped [ in reference label is not allowed
+                                valid_label = false;
+                                break;
+                            }
                         }
-                        if (ref_end < text.len) {
+                        if (ref_end < text.len and valid_label) {
                             if (ref_end == ref_start) {
                                 // [text][] - use text as label
                                 ref_label = text[link_start + 1 .. cb];
@@ -702,9 +900,12 @@ pub const InlineParser = struct {
                             link_node.link_url = ref_def.url;
                             link_node.link_title = ref_def.title;
 
-                            // Parse link text as inlines
+                            // Parse link text as inlines (set inside_link flag to prevent nesting)
                             const link_text = text[link_start + 1 .. cb];
+                            const was_inside_link = self.inside_link;
+                            self.inside_link = true;
                             try self.parseInlines(link_node, link_text);
+                            self.inside_link = was_inside_link;
 
                             parent.appendChild(link_node);
 
@@ -713,50 +914,6 @@ pub const InlineParser = struct {
                             continue;
                         }
                     }
-                }
-            }
-
-            // Check for autolink or raw HTML tag
-            if (ch == '<') {
-                // Try autolink first
-                if (try self.parseAutolink(text, pos)) |result| {
-                    // Flush any pending text
-                    if (pos > text_start) {
-                        try self.addTextNode(parent, text[text_start..pos]);
-                    }
-
-                    // Create link node
-                    const link_node = try Node.create(self.arena_allocator, .link);
-                    link_node.link_url = result.url;
-                    link_node.link_title = null;
-
-                    // Add URL as text content
-                    const text_node = try Node.create(self.arena_allocator, .text);
-                    text_node.literal = result.url;
-                    link_node.appendChild(text_node);
-
-                    parent.appendChild(link_node);
-
-                    pos += result.len;
-                    text_start = pos;
-                    continue;
-                }
-
-                // Try raw HTML tag
-                if (try self.parseRawHtml(text, pos)) |html_len| {
-                    // Flush any pending text
-                    if (pos > text_start) {
-                        try self.addTextNode(parent, text[text_start..pos]);
-                    }
-
-                    // Create HTML inline node
-                    const html_node = try Node.create(self.arena_allocator, .html_inline);
-                    html_node.literal = try self.arena_allocator.dupe(u8, text[pos..pos + html_len]);
-                    parent.appendChild(html_node);
-
-                    pos += html_len;
-                    text_start = pos;
-                    continue;
                 }
             }
 
@@ -788,65 +945,6 @@ pub const InlineParser = struct {
                     // Add the escaped character as text
                     try self.addTextNode(parent, text[pos + 1 .. pos + 2]);
                     pos += 2;
-                    text_start = pos;
-                    continue;
-                }
-            }
-
-            // Check for code span
-            if (ch == '`') {
-                // Count backticks
-                var backtick_count: usize = 0;
-                var i = pos;
-                while (i < text.len and text[i] == '`') {
-                    backtick_count += 1;
-                    i += 1;
-                }
-
-                // Look for closing backticks
-                var close_pos: ?usize = null;
-                var j = i;
-                while (j < text.len) {
-                    if (text[j] == '`') {
-                        var close_count: usize = 0;
-                        var k = j;
-                        while (k < text.len and text[k] == '`') {
-                            close_count += 1;
-                            k += 1;
-                        }
-                        if (close_count == backtick_count) {
-                            close_pos = j;
-                            break;
-                        }
-                        j = k;
-                    } else {
-                        j += 1;
-                    }
-                }
-
-                if (close_pos) |cp| {
-                    // Flush any pending text
-                    if (pos > text_start) {
-                        try self.addTextNode(parent, text[text_start..pos]);
-                    }
-
-                    // Create code span
-                    const code_content = text[i..cp];
-                    // Collapse whitespace runs (converts newlines to spaces)
-                    const collapsed = try self.collapseWhitespace(code_content);
-                    defer self.allocator.free(collapsed);
-
-                    // Trim one space from each end if both present
-                    var final_content = collapsed;
-                    if (final_content.len >= 2 and final_content[0] == ' ' and final_content[final_content.len - 1] == ' ') {
-                        final_content = final_content[1 .. final_content.len - 1];
-                    }
-
-                    const code_node = try Node.create(self.arena_allocator, .code);
-                    code_node.literal = try self.arena_allocator.dupe(u8, final_content);
-                    parent.appendChild(code_node);
-
-                    pos = cp + backtick_count;
                     text_start = pos;
                     continue;
                 }
@@ -916,6 +1014,23 @@ pub const InlineParser = struct {
         parent.appendChild(node);
     }
 
+    // Convert line endings to spaces (for code spans)
+    // Does NOT collapse multiple spaces - only converts newlines
+    fn convertLineEndingsToSpaces(self: *InlineParser, text: []const u8) ![]u8 {
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, text.len);
+        errdefer result.deinit(self.allocator);
+
+        for (text) |ch| {
+            if (ch == '\n' or ch == '\r') {
+                try result.append(self.allocator, ' ');
+            } else {
+                try result.append(self.allocator, ch);
+            }
+        }
+
+        return result.toOwnedSlice(self.allocator);
+    }
+
     fn collapseWhitespace(self: *InlineParser, text: []const u8) ![]u8 {
         var result = try std.ArrayList(u8).initCapacity(self.allocator, text.len);
         errdefer result.deinit(self.allocator);
@@ -982,13 +1097,18 @@ pub const InlineParser = struct {
         }
 
         // Try to parse as email autolink
-        // username@domain
+        // Per spec: one or more chars from specific set, @, one or more label chars
+        // Local part: a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-
+        // Domain part: a-zA-Z0-9.-_  (must contain at least one .)
         var email_end = i;
         var has_at = false;
+        var has_dot_after_at = false;
+        var at_pos: usize = 0;
+
         while (email_end < text.len) {
             const ch = text[email_end];
             if (ch == '>') {
-                if (has_at and email_end > i) {
+                if (has_at and has_dot_after_at and email_end > i) {
                     // Valid email
                     const email = text[i..email_end];
                     const url = try std.fmt.allocPrint(self.arena_allocator, "mailto:{s}", .{email});
@@ -998,9 +1118,29 @@ pub const InlineParser = struct {
             }
             if (ch == '@') {
                 if (has_at) return null; // Multiple @
+                if (email_end == i) return null; // Empty local part
                 has_at = true;
-            } else if (ch == '<' or ch == ' ' or ch == '\n' or ch == '\r') {
+                at_pos = email_end;
+            } else if (ch == '.') {
+                if (has_at) {
+                    has_dot_after_at = true;
+                }
+                // Dots are valid in both parts
+            } else if (ch == '<' or ch == ' ' or ch == '\n' or ch == '\r' or ch == '\t') {
                 return null;
+            } else if (has_at) {
+                // Domain part: only alphanumeric, -, _
+                if (!isAlphaNumeric(ch) and ch != '-' and ch != '_') {
+                    return null;
+                }
+            } else {
+                // Local part: more permissive set
+                if (!isAlphaNumeric(ch) and ch != '!' and ch != '#' and ch != '$' and ch != '%' and
+                    ch != '&' and ch != '\'' and ch != '*' and ch != '+' and ch != '/' and ch != '=' and
+                    ch != '?' and ch != '^' and ch != '_' and ch != '`' and ch != '{' and ch != '|' and
+                    ch != '}' and ch != '~' and ch != '-') {
+                    return null;
+                }
             }
             email_end += 1;
         }
@@ -1193,16 +1333,8 @@ pub const InlineParser = struct {
         while (i < label.len) : (i += 1) {
             const ch = label[i];
 
-            // Handle backslash escapes
-            if (ch == '\\' and i + 1 < label.len) {
-                const next = label[i + 1];
-                if (scanner.isAsciiPunctuation(next)) {
-                    try result.append(self.allocator, std.ascii.toLower(next));
-                    in_whitespace = false;
-                    i += 1; // Skip the escaped character
-                    continue;
-                }
-            }
+            // According to CommonMark spec, backslash escapes are NOT processed during label normalization
+            // Only case-folding, whitespace collapsing, and trimming are performed
 
             if (ch == ' ' or ch == '\t' or ch == '\n') {
                 if (!in_whitespace) {
@@ -1250,6 +1382,37 @@ pub const InlineParser = struct {
                 }
             }
             try result.append(self.allocator, text[i]);
+        }
+
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    // Process both backslash escapes and HTML entities in a string
+    // Used for URLs and titles in links/images
+    fn processEscapesAndEntities(self: *InlineParser, text: []const u8) ![]const u8 {
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, text.len);
+        errdefer result.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < text.len) {
+            // Process backslash escapes first
+            if (text[i] == '\\' and i + 1 < text.len and scanner.isAsciiPunctuation(text[i + 1])) {
+                try result.append(self.allocator, text[i + 1]);
+                i += 2;
+                continue;
+            }
+
+            // Process HTML entities
+            if (text[i] == '&') {
+                if (entities.decodeEntity(text, i)) |decoded| {
+                    try result.appendSlice(self.allocator, decoded.str);
+                    i += decoded.len;
+                    continue;
+                }
+            }
+
+            try result.append(self.allocator, text[i]);
+            i += 1;
         }
 
         return result.toOwnedSlice(self.allocator);

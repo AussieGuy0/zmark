@@ -110,6 +110,11 @@ pub fn isAlphanumeric(ch: u8) bool {
     return isAlpha(ch) or isDigit(ch);
 }
 
+pub fn isControl(ch: u8) bool {
+    // Control characters are 0x00-0x1F and 0x7F
+    return ch < 0x20 or ch == 0x7F;
+}
+
 // Tab expansion - converts tabs to spaces with tab stops at 4
 pub fn expandTabs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
