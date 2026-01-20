@@ -347,6 +347,9 @@ pub const BlockParser = struct {
 
         // List items: -, +, *, or digits followed by . or )
         if (ch == '-' or ch == '+' or ch == '*') {
+            // Empty list item (just marker, no space)
+            if (content.len == 1) return true;
+            // Regular list item (marker + space)
             if (content.len >= 2 and (content[1] == ' ' or content[1] == '\t')) {
                 return true;
             }
@@ -355,6 +358,9 @@ pub const BlockParser = struct {
             var i: usize = 1;
             while (i < content.len and content[i] >= '0' and content[i] <= '9') : (i += 1) {}
             if (i < content.len and (content[i] == '.' or content[i] == ')')) {
+                // Empty list item (just number + delimiter)
+                if (i + 1 >= content.len) return true;
+                // Regular list item (number + delimiter + space)
                 if (i + 1 < content.len and (content[i + 1] == ' ' or content[i + 1] == '\t')) {
                     return true;
                 }
@@ -1072,22 +1078,9 @@ pub const BlockParser = struct {
 
         // Add content if present
         if (content.len > 0) {
-            // Check if content is a thematic break
-            // Thematic breaks are special-cased because they can appear on the first line
-            if (try self.parseThematicBreak(content)) {
-                // Thematic break was created, tip was updated by parseThematicBreak
-                return true;
-            }
-
-            // Create paragraph for content
-            const para = try Node.create(self.arena_allocator, .paragraph);
-            para.start_line = self.line_number;
-            item.appendChild(para);
-            self.tip = para;
-
-            const text_node = try Node.create(self.arena_allocator, .text);
-            text_node.literal = try self.arena_allocator.dupe(u8, content);
-            para.appendChild(text_node);
+            // Process the content through normal block parsing
+            // This allows headings, nested lists, block quotes, etc. to be recognized
+            try self.processLineContent(content);
         }
 
         return true;

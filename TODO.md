@@ -48,7 +48,7 @@
   - [ ] Lazy continuation (paragraphs without `>`)
   - [~] Tests: spec examples in "Block quotes" section
 
-- [x] **List items** (20/40 failures fixed) ✅
+- [~] **List items** (38/48 passing - 79%) 🎯
   - [x] Detect list markers:
     - [x] Unordered: `-`, `+`, `*`
     - [x] Ordered: `1.`, `2)`, etc.
@@ -56,8 +56,14 @@
   - [x] Account for stripped indentation in indent calculation
   - [x] Handle blank lines within list items
   - [x] Container matching for list item continuation
-  - [x] Can contain nested blocks (code, quotes, lists)
-  - [~] Tests: spec examples in "List items" section (20 edge cases remaining)
+  - [x] Can contain nested blocks (code, quotes, lists, headings) ✅
+  - [x] Process first line content through block parser (not just as paragraph) ✅
+  - [x] Recognize empty list markers as structural elements ✅
+  - [!] Remaining issues:
+    - [ ] Empty list items create separate lists instead of continuing
+    - [ ] Indented code blocks (4+ spaces) not recognized in list items
+    - [ ] Tight/loose rendering edge cases with multiple blocks
+  - [~] Tests: spec examples in "List items" section (10 failures remaining)
 
 - [~] **Lists**
   - [x] Detect list start
@@ -131,28 +137,32 @@
   - [ ] Hexadecimal entities (`&#x1F;`)
   - [ ] Entity decoding
 
-- [ ] **Raw HTML inline**
-  - [ ] Detect HTML tags
-  - [ ] Parse tag structure
-  - [ ] Pass through without modification
-  - [ ] Tests: spec examples in "Raw HTML" section
+- [~] **Raw HTML inline** (most passing, 6 edge cases remain)
+  - [x] Detect HTML tags
+  - [x] Parse tag structure (opening tags, closing tags, comments, etc.)
+  - [x] Require whitespace before attributes ✅
+  - [x] Pass through without modification
+  - [!] Remaining: HTML block vs inline detection edge cases
+  - [~] Tests: spec examples in "Raw HTML" section
 
 ### Emphasis and Strong Emphasis
-- [ ] **Emphasis/Strong implementation**
-  - [ ] Detect delimiter runs (`*`, `_`)
-  - [ ] Determine left/right-flanking
-  - [ ] Implement can-open/can-close rules
-  - [ ] Push delimiters to stack
-  - [ ] Process delimiter stack:
-    - [ ] Look for matching pairs
-    - [ ] Handle precedence (`***` -> strong vs em)
-    - [ ] Remove used delimiters
-  - [ ] Tests: spec examples in "Emphasis and strong emphasis" section
-    - [ ] Basic cases
-    - [ ] Intraword emphasis
-    - [ ] Nested emphasis
-    - [ ] Multiple delimiters
-    - [ ] Edge cases
+- [~] **Emphasis/Strong implementation** (90% complete - 5 edge cases remain) 🎯
+  - [x] Detect delimiter runs (`*`, `_`)
+  - [x] Determine left/right-flanking
+  - [x] Implement can-open/can-close rules (rule 9)
+  - [x] Push delimiters to stack
+  - [x] Process delimiter stack:
+    - [x] Look for matching pairs (backwards search from closer)
+    - [x] Handle precedence (`***` -> strong vs em)
+    - [x] Remove used delimiters
+    - [x] Process closers left-to-right ✅
+    - [x] Use 2 delimiters if both >= 2, else 1 ✅
+    - [x] Remove intervening delimiters from stack ✅
+  - [~] Tests: spec examples in "Emphasis and strong emphasis" section
+    - [x] Basic cases ✅
+    - [x] Intraword emphasis ✅
+    - [x] Most nested emphasis ✅
+    - [!] Remaining: 5 complex multi-delimiter cases (e.g., `*foo**bar**baz*`)
 
 ### Links and Images
 - [ ] **Links** (most complex inline element)
@@ -267,12 +277,12 @@
 - [ ] Add ability to run single test by number
 
 ### Compliance Target
-- [ ] **Goal: 100% pass rate (652/652 tests)**
+- [~] **Goal: 100% pass rate (652/652 tests)**
   - Track progress here as tests pass:
-  - [ ] 25% (163 tests)
-  - [ ] 50% (326 tests)
-  - [ ] 75% (489 tests)
-  - [ ] 90% (587 tests)
+  - [x] 25% (163 tests) ✅
+  - [x] 50% (326 tests) ✅
+  - [x] 75% (489 tests) ✅
+  - [~] 90% (587 tests) - **Currently at 89.7% (585/652)** 🎯
   - [ ] 95% (619 tests)
   - [ ] 99% (646 tests)
   - [ ] 100% (652 tests) 🎉
@@ -366,25 +376,38 @@
 ## Current Status
 
 **Phase**: Phase 2/3 - Block Structure Parser + Inline Parsing (In Progress)
-**Tests Passing**: 570/652 (87.4%)
-**Last Updated**: 2026-01-20
-**Status**: Active development - 82 tests remaining (87.4% → target 100%)
+**Tests Passing**: 585/652 (89.7%)
+**Last Updated**: 2026-01-21
+**Status**: Active development - 67 tests remaining (89.7% → target 100%)
 
-**Breakdown of remaining 82 failures**:
-- Emphasis and strong emphasis: 16 failures (delimiter algorithm, UTF-8)
-- List items: 14 failures (indentation, tight/loose detection)
+**Breakdown of remaining 67 failures**:
 - Links: 11 failures (precedence, nested links)
-- HTML blocks: 9 failures (was 16, fixed 11 with newline! ✅)
-- Lists: 9 failures (related to list items)
+- List items: 10 failures (indented code, empty items, tight/loose - **fixed 4!** ✅)
+- HTML blocks: 10 failures (block detection edge cases)
+- Lists: 8 failures (related to list items - **fixed 1!** ✅)
 - Block quotes: 6 failures (lazy continuation rules)
+- Raw HTML: 6 failures (tag validation edge cases)
+- Emphasis and strong emphasis: 5 failures (complex nesting - **fixed 11!** ✅)
 - Link reference definitions: 5 failures (multiline, Unicode case-folding)
-- Raw HTML: 5 failures (tag validation edge cases)
 - Tabs: 4 failures (expansion in nested structures)
-- Autolinks: 2 failures (backslash escapes in parseRawHtml)
-- Images: 1 failure
-- Others: various edge cases
+- Autolinks: 1 failure (HTML block detection - **fixed 1!** ✅)
+- Images: 1 failure (nested links in alt text)
 
-**Current focus**: Systematically fixing edge cases. No category has overwhelming failures - all are manageable!
+**Recent progress (2026-01-21)**:
+- ✅ **Emphasis delimiter processing**: Fixed 11/16 failures by improving the algorithm
+  - Implemented proper left-to-right closer processing
+  - Fixed delimiter removal and counting logic
+  - Improved handling of delimiter runs with varying lengths
+- ✅ **List item parsing**: Fixed 4/14 failures by allowing block-level content
+  - Changed first line processing to use `processLineContent()` instead of forcing paragraphs
+  - Now correctly recognizes headings in list items (e.g., `- # Foo`)
+  - Now correctly creates nested lists (e.g., `- - foo`, `1. - 2. foo`)
+  - Block quotes in list items now parse correctly
+- ✅ **Raw HTML attribute parsing**: Fixed 1 autolink failure
+  - Added requirement for whitespace before HTML tag attributes per CommonMark spec
+- ✅ **Overall improvement**: 570/652 (87.4%) → 585/652 (89.7%) - **+15 tests!**
+
+**Current focus**: Remaining list items edge cases (empty items, indented code), then Links and HTML blocks
 
 ## Notes
 

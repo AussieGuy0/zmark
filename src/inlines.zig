@@ -322,28 +322,30 @@ pub const InlineParser = struct {
     }
 
     // Process emphasis delimiters using the CommonMark algorithm
-    // Takes the first delimiter in the stack
+    // Implements the algorithm from the spec section 6.2
     fn processEmphasisStack(self: *InlineParser, parent: *Node, stack_bottom: *Delimiter) !void {
         _ = parent;
 
-        // Process all potential closers
-        var closer = stack_bottom;
-        while (closer.next) |next_closer| {
-            closer = next_closer;
+        // Process all potential closers from left to right
+        var closer_opt: ?*Delimiter = stack_bottom.next;
 
-            // Skip if can't close
-            if (!closer.can_close or (closer.char != '*' and closer.char != '_')) {
+        while (closer_opt) |closer| {
+            const next_closer = closer.next;
+
+            // Skip if can't close or has no delimiters left
+            if (!closer.can_close or closer.num == 0 or (closer.char != '*' and closer.char != '_')) {
+                closer_opt = next_closer;
                 continue;
             }
 
-            // Look for matching opener
+            // Look for matching opener (search backwards from closer)
             var opener_opt = closer.prev;
             var opener: *Delimiter = undefined;
             var opener_found = false;
 
             while (opener_opt) |current_opener| {
-                // Skip if wrong character or can't open
-                if (current_opener.char != closer.char or !current_opener.can_open) {
+                // Skip if wrong character, can't open, or used up
+                if (current_opener.char != closer.char or !current_opener.can_open or current_opener.num == 0) {
                     opener_opt = current_opener.prev;
                     continue;
                 }
@@ -361,15 +363,13 @@ pub const InlineParser = struct {
             }
 
             if (!opener_found) {
+                closer_opt = next_closer;
                 continue;
             }
 
             // Match found! Determine number of delimiters to use
-            // Prefer strong (2) over regular (1), but don't exceed what's available
-            var use_delims: usize = if (opener.num >= 2 and closer.num >= 2) 2 else 1;
-            // Make sure we don't use more than available
-            use_delims = @min(use_delims, opener.num);
-            use_delims = @min(use_delims, closer.num);
+            // Use 2 if both have >=2, otherwise use 1
+            const use_delims: usize = if (opener.num >= 2 and closer.num >= 2) 2 else 1;
             const emph_type: NodeType = if (use_delims == 2) .strong else .emph;
 
             // Create the emphasis node
@@ -407,25 +407,22 @@ pub const InlineParser = struct {
             }
 
             // Remove any delimiters between opener and closer from the stack
-            // They are now inside the emphasis node
-            if (opener.next) |next_delim| {
-                var delim_to_remove = next_delim;
-                while (delim_to_remove != closer) {
-                    delim_to_remove.can_open = false;
-                    delim_to_remove.can_close = false;
-                    if (delim_to_remove.next) |next| {
-                        delim_to_remove = next;
-                    } else {
-                        break;
-                    }
-                }
+            // They are now inside the emphasis node and should not be processed again
+            var delim_to_remove_opt = opener.next;
+            while (delim_to_remove_opt) |delim_to_remove| {
+                if (delim_to_remove == closer) break;
+                const next_delim = delim_to_remove.next;
+                delim_to_remove.can_open = false;
+                delim_to_remove.can_close = false;
+                delim_to_remove_opt = next_delim;
             }
 
-            // If opener still has delimiters, continue from there to find inner matches
-            if (opener.num > 0) {
-                // Process inner delimiters
-                // This handles cases like *(*foo*)*
-                continue;
+            // If closer still has delimiters, it might match with another opener
+            // So we DON'T advance closer_opt - we stay on the same closer and try again
+            if (closer.num > 0) {
+                closer_opt = closer;
+            } else {
+                closer_opt = next_closer;
             }
         }
     }
@@ -1243,6 +1240,7 @@ pub const InlineParser = struct {
 
             // Parse attributes
             while (i < text.len) {
+                const whitespace_start = i;
                 // Skip whitespace
                 while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n')) {
                     i += 1;
@@ -1258,6 +1256,12 @@ pub const InlineParser = struct {
                 // Check for self-closing tag
                 if (text[i] == '/' and i + 1 < text.len and text[i + 1] == '>') {
                     return i + 2 - pos;
+                }
+
+                // If we're about to parse an attribute, we MUST have consumed whitespace
+                if (i == whitespace_start) {
+                    // No whitespace before attribute - invalid
+                    return null;
                 }
 
                 // Parse attribute name
