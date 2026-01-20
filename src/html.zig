@@ -222,9 +222,16 @@ pub const HtmlRenderer = struct {
             .softbreak => {
                 try self.buffer.appendSlice(self.allocator,"\n");
             },
-            .html_block, .html_inline => {
+            .html_block => {
                 if (node.literal) |lit| {
-                    try self.buffer.appendSlice(self.allocator,lit);
+                    try self.buffer.appendSlice(self.allocator, lit);
+                }
+                // HTML blocks should end with a newline
+                try self.buffer.append(self.allocator, '\n');
+            },
+            .html_inline => {
+                if (node.literal) |lit| {
+                    try self.buffer.appendSlice(self.allocator, lit);
                 }
             },
         }
