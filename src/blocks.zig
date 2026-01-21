@@ -164,8 +164,17 @@ pub const BlockParser = struct {
             }
 
             // Mark list items with trailing blanks
-            if (self.tip.type == .list_item) {
-                self.tip.has_trailing_blank = true;
+            // But NOT if we're in a fenced code block (those blanks don't count)
+            if (!self.in_fenced_code) {
+                // Walk up the tree and mark ALL ancestor list items
+                // This handles nested lists correctly
+                var ancestor = self.tip;
+                while (ancestor != self.root) {
+                    if (ancestor.type == .list_item) {
+                        ancestor.has_trailing_blank = true;
+                    }
+                    ancestor = ancestor.parent orelse break;
+                }
             }
         }
 
@@ -420,6 +429,9 @@ pub const BlockParser = struct {
                 // Blank lines don't match block quotes (they close them)
                 if (is_blank) return false;
 
+                // Save offset before skipping spaces (in case of lazy continuation)
+                const saved_offset = offset.*;
+
                 // Skip up to 3 spaces
                 const indent = utils.calculateIndentation(line[offset.*..]);
                 const to_skip = @min(indent, 3);
@@ -431,8 +443,10 @@ pub const BlockParser = struct {
                     // and the line doesn't look like a structural element
                     if (self.tip.type == .paragraph) {
                         // Check if line looks like a structural element that would interrupt the paragraph
-                        const remaining_line = if (offset.* < line.len) line[offset.*..] else "";
+                        // Use the saved offset to check the original line content
+                        const remaining_line = if (saved_offset < line.len) line[saved_offset..] else "";
                         if (looksLikeStructuralElement(remaining_line)) {
+                            offset.* = saved_offset; // Restore offset before failing
                             return false;
                         }
 
@@ -440,13 +454,16 @@ pub const BlockParser = struct {
                         while (check) |node| {
                             if (node == container) {
                                 // We're in a paragraph inside this block quote
-                                // Allow lazy continuation (don't consume anything)
+                                // Allow lazy continuation (don't consume anything - restore offset)
+                                offset.* = saved_offset;
                                 self.is_lazy_continuation = true;
                                 return true;
                             }
                             check = node.parent;
                         }
                     }
+                    // No lazy continuation possible - restore offset and fail
+                    offset.* = saved_offset;
                     return false;
                 }
 
@@ -518,6 +535,13 @@ pub const BlockParser = struct {
     }
 
     fn processLineContent(self: *BlockParser, content: []const u8) anyerror!void {
+        // Lazy continuation lines should just be added to the paragraph
+        // Don't try to parse them as structural elements
+        if (self.is_lazy_continuation) {
+            try self.addTextToParagraph(content);
+            return;
+        }
+
         // Check if content is blank (after container markers have been stripped)
         const is_blank_content = utils.isBlankLine(content);
 
@@ -863,8 +887,9 @@ pub const BlockParser = struct {
             code.literal = try self.arena_allocator.dupe(u8, "");
         }
 
-        // Remove 4 spaces of indentation
-        const content = utils.skipIndentation(line, 4);
+        // Remove 4 spaces of indentation, handling partial tabs correctly
+        const result = try utils.skipIndentationAlloc(self.arena_allocator, line, 4);
+        const content = result.content;
 
         // Append line to code block literal
         const current_literal = self.tip.literal orelse "";
@@ -923,10 +948,14 @@ pub const BlockParser = struct {
         code.start_line = self.line_number;
         code.literal = null; // Will be set when first line is added
 
-        // Store info string if present (with backslash escapes and entities processed)
+        // Store info string (with backslash escapes and entities processed)
+        // Always set code_info for fenced code blocks (even if empty)
+        // This allows us to distinguish fenced from indented code blocks
         if (info.len > 0) {
             const processed_info = try self.processEscapesAndEntities(info);
             code.code_info = processed_info;
+        } else {
+            code.code_info = "";
         }
 
         self.tip.appendChild(code);
@@ -2141,10 +2170,12 @@ pub const BlockParser = struct {
             child = c.next;
         }
 
-        // Trim trailing blank lines from code blocks
-        // The spec says to remove trailing blank lines
-        // But we need to be careful: a line with only spaces is NOT blank
-        if (node.type == .code_block) {
+        // Trim trailing blank lines from INDENTED code blocks only
+        // The spec says to remove trailing blank lines for indented code blocks
+        // Fenced code blocks preserve all content including trailing blank lines
+        // We can distinguish them: fenced code blocks have code_info set, indented don't
+        if (node.type == .code_block and node.code_info == null) {
+            // This is an indented code block - trim trailing blank lines
             if (node.literal) |lit| {
                 // Find the last non-newline character
                 var last_content: usize = 0;
@@ -2154,8 +2185,6 @@ pub const BlockParser = struct {
                     }
                 }
                 // Strip everything after the last content character
-                // But the content might end with a newline that should be preserved
-                // Actually, the HTML renderer adds a newline, so we should not include trailing newlines
                 node.literal = lit[0..last_content];
             }
         }

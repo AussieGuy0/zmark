@@ -117,10 +117,10 @@ pub fn skipIndentationAlloc(allocator: std.mem.Allocator, s: []const u8, columns
                 var result = try std.ArrayList(u8).initCapacity(allocator, partial_tab_spaces + remaining.len);
                 var j: usize = 0;
                 while (j < partial_tab_spaces) : (j += 1) {
-                    try result.append(' ');
+                    try result.append(allocator, ' ');
                 }
-                try result.appendSlice(remaining);
-                return .{ .content = try result.toOwnedSlice(), .allocated = true, .partial_tab_spaces = partial_tab_spaces };
+                try result.appendSlice(allocator, remaining);
+                return .{ .content = try result.toOwnedSlice(allocator), .allocated = true, .partial_tab_spaces = partial_tab_spaces };
             }
         } else {
             break;

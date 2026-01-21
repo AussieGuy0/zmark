@@ -60,21 +60,20 @@ pub const HtmlRenderer = struct {
                 }
 
                 // Check if we're in a tight list - if so, don't render <p> tags
+                // BUT only if the paragraph is a direct child of the list item
+                // Paragraphs inside blockquotes, etc. should still get <p> tags
                 var in_tight_list = false;
-                var check_parent = node.parent;
-                while (check_parent) |parent| {
-                    if (parent.type == .list_item) {
+                if (node.parent) |direct_parent| {
+                    if (direct_parent.type == .list_item) {
                         // Check if this list item's parent list is tight
-                        if (parent.parent) |list| {
+                        if (direct_parent.parent) |list| {
                             if (list.type == .list and list.list_data != null) {
                                 if (list.list_data.?.tight) {
                                     in_tight_list = true;
                                 }
                             }
                         }
-                        break;
                     }
-                    check_parent = parent.parent;
                 }
 
                 if (!in_tight_list) {
