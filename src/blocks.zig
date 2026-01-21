@@ -29,6 +29,8 @@ pub const BlockParser = struct {
     partial_refdef: ?PartialRefDef,
     // Store the original line with indentation (before stripping)
     current_line_remaining: []const u8,
+    // Store the completely original line (before any processing)
+    current_line_original: []const u8,
     // Track if current line is a lazy continuation (no container markers)
     is_lazy_continuation: bool,
     // Track if we've seen a blank line at the list level (between items)
@@ -39,8 +41,10 @@ pub const BlockParser = struct {
         url: ?[]const u8,
         title: ?[]const u8,
         title_delimiter: u8,
-        expecting: enum { url, title_or_end, title_continuation, end },
+        expecting: enum { label_continuation, url, title_or_end, title_continuation, end },
         accumulated: std.ArrayList(u8),
+        // Track consumed lines so we can output them if refdef is invalid
+        consumed_lines: std.ArrayList([]const u8),
     };
 
     pub fn init(allocator: std.mem.Allocator, arena_allocator: std.mem.Allocator, root: *Node) !BlockParser {
@@ -66,6 +70,7 @@ pub const BlockParser = struct {
             .refmap = std.StringHashMap(RefDef).init(allocator),
             .partial_refdef = null,
             .current_line_remaining = "",
+            .current_line_original = "",
             .is_lazy_continuation = false,
             .blank_line_before_next_item = false,
         };
@@ -79,6 +84,7 @@ pub const BlockParser = struct {
         // Free partial refdef if present
         if (self.partial_refdef) |*partial| {
             partial.accumulated.deinit(self.allocator);
+            partial.consumed_lines.deinit(self.allocator);
         }
     }
 
@@ -100,8 +106,7 @@ pub const BlockParser = struct {
             if (partial.url != null) {
                 try self.finalizePartialRefDef();
             } else {
-                partial.accumulated.deinit(self.allocator);
-                self.partial_refdef = null;
+                try self.abandonPartialRefDef();
             }
         }
 
@@ -118,46 +123,38 @@ pub const BlockParser = struct {
         self.offset = 0;
         self.column = 0;
         self.is_lazy_continuation = false; // Reset at start of each line
-
-        // If we're in an HTML block, check for end condition
-        if (self.in_html_block) {
-            try self.addToHtmlBlock(line);
-            if (self.checkHtmlBlockEnd(line)) {
-                self.in_html_block = false;
-                self.tip = self.tip.parent.?;
-            }
-            return;
-        }
+        self.current_line_original = line; // Store original line for refdef tracking
 
         const is_blank = utils.isBlankLine(line);
 
         // Check if line is blank
         if (is_blank) {
-            // Blank lines within code blocks are preserved
-            if (self.tip.type == .code_block) {
-                try self.addToCodeBlock(line);
-                return;
-            }
+            // Blank lines within fenced code blocks are preserved and handled later
+            // Blank lines within indented code blocks need container matching first
+            // to determine if they're still within the same containers
 
             // Blank line terminates any partial link reference definition
             if (self.partial_refdef) |*partial| {
                 // Blank lines are not allowed within titles
                 if (partial.expecting == .title_continuation) {
                     // Invalid - title can't span blank lines
-                    partial.accumulated.deinit(self.allocator);
-                    self.partial_refdef = null;
+                    try self.abandonPartialRefDef();
                 } else if (partial.url != null) {
                     // Finalize if we have at least a URL
                     try self.finalizePartialRefDef();
                 } else {
                     // Invalid partial refdef, discard it
-                    partial.accumulated.deinit(self.allocator);
-                    self.partial_refdef = null;
+                    try self.abandonPartialRefDef();
                 }
             }
 
             // Blank line closes paragraph
             if (self.tip.type == .paragraph) {
+                self.tip = self.tip.parent.?;
+            }
+
+            // Blank line also closes block quote
+            if (self.tip.type == .block_quote) {
                 self.tip = self.tip.parent.?;
             }
 
@@ -202,6 +199,10 @@ pub const BlockParser = struct {
             if (self.tip.type == .code_block and self.in_fenced_code) {
                 self.in_fenced_code = false;
             }
+            // If we're closing an HTML block, update the flag
+            if (self.tip.type == .html_block and self.in_html_block) {
+                self.in_html_block = false;
+            }
             self.tip = self.tip.parent.?;
         }
 
@@ -216,6 +217,16 @@ pub const BlockParser = struct {
         // Get remaining line content after container markers
         const remaining = if (current_offset < line.len) line[current_offset..] else "";
 
+        // If we're in an HTML block, handle it after matching containers
+        if (self.in_html_block) {
+            try self.addToHtmlBlock(remaining);
+            if (self.checkHtmlBlockEnd(remaining)) {
+                self.in_html_block = false;
+                self.tip = self.tip.parent.?;
+            }
+            return;
+        }
+
         // If we're in a fenced code block, handle it after matching containers
         if (self.in_fenced_code) {
             if (try self.checkClosingFence(remaining)) {
@@ -228,8 +239,12 @@ pub const BlockParser = struct {
             return;
         }
 
-        // Don't process blank lines further
+        // Don't process blank lines further (but add them to indented code blocks if still inside one)
         if (is_blank) {
+            if (self.tip.type == .code_block and !self.in_fenced_code) {
+                // Still in an indented code block after container matching - add blank line
+                try self.addToCodeBlock(line);
+            }
             return;
         }
 
@@ -284,14 +299,20 @@ pub const BlockParser = struct {
                 if (content.len == 0) break :blk false;
                 const ch = content[0];
                 // Check for bullet list markers
-                if ((ch == '-' or ch == '+' or ch == '*') and content.len >= 2) {
-                    if (content[1] == ' ' or content[1] == '\t') break :blk true;
+                if (ch == '-' or ch == '+' or ch == '*') {
+                    // Empty list item (just the marker)
+                    if (content.len == 1) break :blk true;
+                    // List item with content (marker + space/tab)
+                    if (content.len >= 2 and (content[1] == ' ' or content[1] == '\t')) break :blk true;
                 }
                 // Check for ordered list markers
                 if (ch >= '0' and ch <= '9') {
                     var i: usize = 1;
                     while (i < content.len and content[i] >= '0' and content[i] <= '9') : (i += 1) {}
                     if (i < content.len and (content[i] == '.' or content[i] == ')')) {
+                        // Empty list item (just marker and delimiter)
+                        if (i + 1 >= content.len) break :blk true;
+                        // List item with content (marker + delimiter + space/tab)
                         if (i + 1 < content.len and (content[i + 1] == ' ' or content[i + 1] == '\t')) {
                             break :blk true;
                         }
@@ -451,10 +472,16 @@ pub const BlockParser = struct {
                 // Check if line is indented enough to be part of this list item
                 const item_indent = container.indent;
                 const line_indent = utils.calculateIndentation(line[offset.*..]);
+                const absolute_indent = offset.* + line_indent;
 
-                if (line_indent >= item_indent) {
+                if (absolute_indent >= item_indent) {
                     // Consume the required indentation
-                    offset.* += utils.skipSpaces(line[offset.*..], item_indent);
+                    // We need to consume (item_indent - offset.*) spaces
+                    // If we've already consumed more than needed, don't consume more
+                    if (offset.* < item_indent) {
+                        const spaces_to_consume = item_indent - offset.*;
+                        offset.* += utils.skipSpaces(line[offset.*..], spaces_to_consume);
+                    }
                     return true;
                 }
 
@@ -491,6 +518,29 @@ pub const BlockParser = struct {
     }
 
     fn processLineContent(self: *BlockParser, content: []const u8) anyerror!void {
+        // Check if content is blank (after container markers have been stripped)
+        const is_blank_content = utils.isBlankLine(content);
+
+        if (is_blank_content) {
+            // Blank line within a container - close paragraph if open
+            if (self.tip.type == .paragraph) {
+                self.tip = self.tip.parent.?;
+            }
+            // Mark list items with trailing blanks
+            if (self.tip.type == .list_item) {
+                self.tip.has_trailing_blank = true;
+            }
+            // Blank lines within code blocks are handled elsewhere
+            return;
+        }
+
+        // Check for indented code block (4+ spaces and not in paragraph)
+        const content_indent = utils.calculateIndentation(content);
+        if (content_indent >= 4 and self.tip.type != .paragraph and self.partial_refdef == null) {
+            try self.addToCodeBlock(content);
+            return;
+        }
+
         // If we have a partial link reference definition, try to continue it
         if (self.partial_refdef != null) {
             if (try self.continuePartialRefDef(content)) {
@@ -510,14 +560,16 @@ pub const BlockParser = struct {
             return;
         }
 
-        // Try to match HTML block
-        if (try self.parseHtmlBlock(content)) {
+        // Try to match HTML block (pass both stripped and original for indentation preservation)
+        if (try self.parseHtmlBlock(content, self.current_line_remaining)) {
             return;
         }
 
         // Try to match fenced code block opening
-        const indent = 0; // Already stripped
-        if (try self.parseFencedCodeBlock(content, indent)) {
+        // Calculate the original indent from current_line_remaining
+        const original_indent = utils.calculateIndentation(self.current_line_remaining);
+        const fence_indent = @min(original_indent, 3); // We strip up to 3 spaces
+        if (try self.parseFencedCodeBlock(content, fence_indent)) {
             return;
         }
 
@@ -554,6 +606,8 @@ pub const BlockParser = struct {
             self.tip = self.tip.parent.?;
         }
 
+        self.markParentListAsLooseIfNeeded();
+
         // Create block quote
         const quote = try Node.create(self.arena_allocator, .block_quote);
         quote.start_line = self.line_number;
@@ -571,8 +625,16 @@ pub const BlockParser = struct {
             return true;
         }
 
+        // Update current_line_remaining for recursive call
+        const saved_line = self.current_line_remaining;
+        self.current_line_remaining = content;
+
         // Process the rest of the line recursively
         try self.processLineContent(content);
+
+        // Restore for safety (though it shouldn't matter)
+        self.current_line_remaining = saved_line;
+
         return true;
     }
 
@@ -609,6 +671,8 @@ pub const BlockParser = struct {
             if (self.tip.type == .list) {
                 self.tip = self.tip.parent.?;
             }
+
+            self.markParentListAsLooseIfNeeded();
 
             // Create thematic break
             const hr = try Node.create(self.arena_allocator, .thematic_break);
@@ -728,6 +792,8 @@ pub const BlockParser = struct {
             self.tip = self.tip.parent.?;
         }
 
+        self.markParentListAsLooseIfNeeded();
+
         // Create heading
         const heading = try Node.create(self.arena_allocator, .heading);
         heading.heading_level = @intCast(level);
@@ -745,9 +811,24 @@ pub const BlockParser = struct {
         return true;
     }
 
+    fn markParentListAsLooseIfNeeded(self: *BlockParser) void {
+        // Check if we're adding a second block-level element to a list item
+        // that already has content and had a trailing blank - this makes the list loose
+        if (self.tip.type == .list_item and self.tip.has_trailing_blank and self.tip.first_child != null) {
+            // Find the parent list and mark it as loose
+            if (self.tip.parent) |list| {
+                if (list.type == .list and list.list_data != null) {
+                    list.list_data.?.tight = false;
+                }
+            }
+        }
+    }
+
     fn addTextToParagraph(self: *BlockParser, line: []const u8) !void {
         // If tip is not a paragraph, create one
         if (self.tip.type != .paragraph) {
+            self.markParentListAsLooseIfNeeded();
+
             const para = try Node.create(self.arena_allocator, .paragraph);
             para.start_line = self.line_number;
             self.tip.appendChild(para);
@@ -773,6 +854,8 @@ pub const BlockParser = struct {
     fn addToCodeBlock(self: *BlockParser, line: []const u8) !void {
         // If tip is not a code block, create one
         if (self.tip.type != .code_block) {
+            self.markParentListAsLooseIfNeeded();
+
             const code = try Node.create(self.arena_allocator, .code_block);
             code.start_line = self.line_number;
             self.tip.appendChild(code);
@@ -832,6 +915,8 @@ pub const BlockParser = struct {
         if (self.tip.type == .paragraph) {
             self.tip = self.tip.parent.?;
         }
+
+        self.markParentListAsLooseIfNeeded();
 
         // Create fenced code block
         const code = try Node.create(self.arena_allocator, .code_block);
@@ -971,6 +1056,12 @@ pub const BlockParser = struct {
             return false;
         }
 
+        // Ordered lists can only interrupt a paragraph if they start with 1
+        // Per CommonMark spec: "we allow only lists starting with `1` to interrupt paragraphs"
+        if (marker_type == .ordered and start_num != 1 and self.tip.type == .paragraph) {
+            return false;
+        }
+
         // Calculate marker width and content indent
         const marker_width = marker_end + 1; // +1 for the required space
 
@@ -978,21 +1069,36 @@ pub const BlockParser = struct {
         // Skip the marker and the required space
         var content_start = marker_end + 1;
 
-        // Skip additional spaces/tabs after marker (up to 3 more)
-        var spaces_after_marker: usize = 0;
-        while (content_start < line.len and spaces_after_marker < 4) {
-            const c = line[content_start];
+        // Count additional spaces/tabs after the required space
+        var spaces_count: usize = 0;
+        var temp_pos = content_start;
+        while (temp_pos < line.len) {
+            const c = line[temp_pos];
             if (c == ' ') {
-                spaces_after_marker += 1;
-                content_start += 1;
+                spaces_count += 1;
+                temp_pos += 1;
             } else if (c == '\t') {
                 // Tab counts as moving to next tab stop
-                spaces_after_marker += 4 - (marker_width % 4);
-                content_start += 1;
+                spaces_count += 4 - ((marker_width + spaces_count) % 4);
+                temp_pos += 1;
                 break;
             } else {
                 break;
             }
+        }
+
+        // Determine how many spaces to actually consume
+        // If there are 4+ spaces, it's an indented code block - don't consume the extra spaces
+        // Otherwise, consume up to 3 additional spaces (N can be 1-4 total)
+        var spaces_after_marker: usize = 0;
+        if (spaces_count >= 4) {
+            // Leave all extra spaces for indented code block processing
+            spaces_after_marker = 0;
+            // content_start stays at marker_end + 1 (after required space)
+        } else {
+            // Consume these spaces (up to 3 additional)
+            spaces_after_marker = spaces_count;
+            content_start = temp_pos;
         }
 
         // Get the actual content
@@ -1010,6 +1116,8 @@ pub const BlockParser = struct {
         if (self.tip.type == .paragraph) {
             self.tip = self.tip.parent.?;
         }
+
+        self.markParentListAsLooseIfNeeded();
 
         // Create or find list
         var list_node: *Node = undefined;
@@ -1078,30 +1186,44 @@ pub const BlockParser = struct {
 
         // Add content if present
         if (content.len > 0) {
+            // Update current_line_remaining for recursive call
+            const saved_line = self.current_line_remaining;
+            self.current_line_remaining = content;
+
             // Process the content through normal block parsing
             // This allows headings, nested lists, block quotes, etc. to be recognized
             try self.processLineContent(content);
+
+            // Restore for safety (though it shouldn't matter)
+            self.current_line_remaining = saved_line;
         }
 
         return true;
     }
 
-    fn parseHtmlBlock(self: *BlockParser, line: []const u8) !bool {
+    fn parseHtmlBlock(self: *BlockParser, line: []const u8, original_line: []const u8) !bool {
         if (line.len == 0 or line[0] != '<') return false;
 
-        // Close paragraph if open
+        // Detect HTML block type using stripped line
+        const html_type = detectHtmlBlockType(line);
+        if (html_type == 0) return false;
+
+        // Type 7 HTML blocks cannot interrupt a paragraph
+        if (html_type == 7 and self.tip.type == .paragraph) {
+            return false;
+        }
+
+        // Close paragraph if open (types 1-6 can interrupt)
         if (self.tip.type == .paragraph) {
             self.tip = self.tip.parent.?;
         }
 
-        // Detect HTML block type
-        const html_type = detectHtmlBlockType(line);
-        if (html_type == 0) return false;
+        self.markParentListAsLooseIfNeeded();
 
-        // Create HTML block - use the original line with indentation
+        // Create HTML block - use original line to preserve indentation
         const html_block = try Node.create(self.arena_allocator, .html_block);
         html_block.start_line = self.line_number;
-        html_block.literal = try self.arena_allocator.dupe(u8, self.current_line_remaining);
+        html_block.literal = try self.arena_allocator.dupe(u8, original_line);
         self.tip.appendChild(html_block);
         self.tip = html_block;
 
@@ -1251,7 +1373,7 @@ pub const BlockParser = struct {
     }
 
     fn startsWithTag(line: []const u8, tag: []const u8) bool {
-        if (line.len < tag.len + 2) return false;
+        if (line.len < tag.len + 1) return false;  // Need at least <tag
         if (line[0] != '<') return false;
 
         var i: usize = 1;
@@ -1262,10 +1384,10 @@ pub const BlockParser = struct {
             i += 1;
         }
 
-        // Must be followed by space, >, or end of line
+        // For type 1 HTML blocks, must be followed by space, tab, >, or end of line
         if (i >= line.len) return true;
         const next = line[i];
-        return next == ' ' or next == '\t' or next == '>' or next == '\n';
+        return next == ' ' or next == '\t' or next == '>';
     }
 
     fn startsWithClosingTag(line: []const u8, tag: []const u8) bool {
@@ -1355,7 +1477,24 @@ pub const BlockParser = struct {
                 return false;
             }
         }
-        if (!found_close) return false;
+
+        // If no closing ], label might continue on next line
+        if (!found_close) {
+            var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+            try consumed_lines.append(self.allocator, self.current_line_original);
+            var accumulated = try std.ArrayList(u8).initCapacity(self.allocator, line.len);
+            try accumulated.appendSlice(self.allocator, line[1..]); // Skip the opening [
+            self.partial_refdef = PartialRefDef{
+                .label = &[_]u8{}, // Empty for now
+                .url = null,
+                .title = null,
+                .title_delimiter = 0,
+                .expecting = .label_continuation,
+                .accumulated = accumulated,
+                .consumed_lines = consumed_lines,
+            };
+            return true;
+        }
 
         // Extract label (i now points one past the closing ])
         const label = line[1..i-1];
@@ -1372,6 +1511,8 @@ pub const BlockParser = struct {
         if (i >= line.len) {
             // URL must be on next line
             const normalized_label = try self.normalizeLabel(label);
+            var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+            try consumed_lines.append(self.allocator, self.current_line_original);
             self.partial_refdef = PartialRefDef{
                 .label = normalized_label,
                 .url = null,
@@ -1379,6 +1520,7 @@ pub const BlockParser = struct {
                 .title_delimiter = 0,
                 .expecting = .url,
                 .accumulated = try std.ArrayList(u8).initCapacity(self.allocator, 0),
+                .consumed_lines = consumed_lines,
             };
             return true;
         }
@@ -1390,6 +1532,9 @@ pub const BlockParser = struct {
         const url = url_result.url.?;
         i = url_result.next_pos;
 
+        // Track position before skipping whitespace to check if title has required whitespace
+        const pos_before_ws = i;
+
         // Skip whitespace
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
 
@@ -1398,6 +1543,8 @@ pub const BlockParser = struct {
             // Title might be on next line, or definition might be complete
             const normalized_label = try self.normalizeLabel(label);
             const processed_url = try self.processEscapes(url);
+            var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+            try consumed_lines.append(self.allocator, self.current_line_original);
             self.partial_refdef = PartialRefDef{
                 .label = normalized_label,
                 .url = processed_url,
@@ -1405,11 +1552,17 @@ pub const BlockParser = struct {
                 .title_delimiter = 0,
                 .expecting = .title_or_end,
                 .accumulated = try std.ArrayList(u8).initCapacity(self.allocator, 0),
+                .consumed_lines = consumed_lines,
             };
             return true;
         }
 
-        // Try to parse title on same line
+        // Try to parse title on same line (requires at least one whitespace before title)
+        const has_whitespace = (i > pos_before_ws);
+        if (!has_whitespace) {
+            // Content after URL without whitespace - invalid
+            return false;
+        }
         const title_result = try self.parseTitle(line, i);
         if (title_result.complete) {
             // Title is complete on this line
@@ -1439,6 +1592,8 @@ pub const BlockParser = struct {
             // Title started but not complete - need more lines
             const normalized_label = try self.normalizeLabel(label);
             const processed_url = try self.processEscapesAndEntities(url);
+            var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+            try consumed_lines.append(self.allocator, self.current_line_original);
             self.partial_refdef = PartialRefDef{
                 .label = normalized_label,
                 .url = processed_url,
@@ -1446,6 +1601,7 @@ pub const BlockParser = struct {
                 .title_delimiter = title_result.delimiter,
                 .expecting = .title_continuation,
                 .accumulated = try std.ArrayList(u8).initCapacity(self.allocator, 0),
+                .consumed_lines = consumed_lines,
             };
             // Store the partial title content
             try self.partial_refdef.?.accumulated.appendSlice(self.allocator, title_result.partial_content.?);
@@ -1568,14 +1724,142 @@ pub const BlockParser = struct {
         var partial = &self.partial_refdef.?;
         const content = utils.trimLeft(line);
 
+        // Add this line to consumed lines (use original line, not processed)
+        try partial.consumed_lines.append(self.allocator, self.current_line_original);
+
         switch (partial.expecting) {
+            .label_continuation => {
+                // Continue looking for the closing ]
+                var i: usize = 0;
+                while (i < line.len) : (i += 1) {
+                    if (line[i] == '\\' and i + 1 < line.len) {
+                        i += 1; // Skip escaped character
+                    } else if (line[i] == ']') {
+                        // Found closing ], now check for :
+                        try partial.accumulated.append(self.allocator, '\n');
+                        try partial.accumulated.appendSlice(self.allocator, line[0..i]);
+                        i += 1; // Move past ]
+
+                        // Must be followed by :
+                        if (i >= line.len or line[i] != ':') {
+                            // Not a valid ref def
+                            try self.abandonPartialRefDef();
+                            return false;
+                        }
+                        i += 1; // Move past :
+
+                        // Normalize the label
+                        const label = try self.normalizeLabel(partial.accumulated.items);
+
+                        // Skip whitespace
+                        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+
+                        // Check if URL is on this line or next
+                        if (i >= line.len) {
+                            // URL must be on next line
+                            partial.label = label;
+                            partial.expecting = .url;
+                            partial.accumulated.clearRetainingCapacity();
+                            return true;
+                        }
+
+                        // Parse URL
+                        const url_result = try self.parseUrl(line, i);
+                        if (url_result.url == null) {
+                            try self.abandonPartialRefDef();
+                            return false;
+                        }
+
+                        const url = url_result.url.?;
+                        i = url_result.next_pos;
+
+                        // Track position before skipping whitespace
+                        const pos_before_ws = i;
+
+                        // Skip whitespace
+                        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+
+                        // Check if we're at end of line
+                        if (i >= line.len) {
+                            // Title might be on next line, or definition might be complete
+                            const processed_url = try self.processEscapes(url);
+                            partial.label = label;
+                            partial.url = processed_url;
+                            partial.expecting = .title_or_end;
+                            partial.accumulated.clearRetainingCapacity();
+                            return true;
+                        }
+
+                        // Try to parse title on same line (requires at least one whitespace before title)
+                        const has_whitespace = (i > pos_before_ws);
+                        if (!has_whitespace) {
+                            // Content after URL without whitespace - invalid
+                            try self.abandonPartialRefDef();
+                            return false;
+                        }
+                        const title_result = try self.parseTitle(line, i);
+                        if (title_result.complete) {
+                            // Title is complete on this line
+                            i = title_result.next_pos;
+
+                            // Skip trailing whitespace
+                            while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+
+                            // Must be at end of line
+                            if (i < line.len) {
+                                try self.abandonPartialRefDef();
+                                return false;
+                            }
+
+                            // Store complete definition
+                            const processed_url = try self.processEscapesAndEntities(url);
+                            const processed_title = if (title_result.title) |t| try self.processEscapesAndEntities(t) else null;
+                            const ref_def = RefDef{
+                                .url = processed_url,
+                                .title = processed_title,
+                            };
+                            // Only add if not already present (first definition wins)
+                            const gop = try self.refmap.getOrPut(label);
+                            if (!gop.found_existing) {
+                                gop.value_ptr.* = ref_def;
+                            }
+                            partial.accumulated.deinit(self.allocator);
+                            partial.consumed_lines.deinit(self.allocator);
+                            self.partial_refdef = null;
+                            return true;
+                        } else if (title_result.started) {
+                            // Title started but not complete - need more lines
+                            const processed_url = try self.processEscapesAndEntities(url);
+                            partial.label = label;
+                            partial.url = processed_url;
+                            partial.title_delimiter = title_result.delimiter;
+                            partial.expecting = .title_continuation;
+                            partial.accumulated.clearRetainingCapacity();
+                            try partial.accumulated.appendSlice(self.allocator, title_result.partial_content.?);
+                            return true;
+                        } else {
+                            // No title found, but there's content after URL - invalid
+                            try self.abandonPartialRefDef();
+                            return false;
+                        }
+                    } else if (line[i] == '[') {
+                        // Unescaped [ inside label is not allowed
+                        try self.abandonPartialRefDef();
+                        return false;
+                    }
+                }
+
+                // Didn't find closing ], continue accumulating
+                try partial.accumulated.append(self.allocator, '\n');
+                try partial.accumulated.appendSlice(self.allocator, line);
+                return true;
+            },
             .url => {
                 // Parse URL
                 const url_result = try self.parseUrl(content, 0);
                 if (url_result.url == null) {
                     // Invalid, abandon partial refdef
-                    partial.accumulated.deinit(self.allocator);
-                    self.partial_refdef = null;
+                    try self.abandonPartialRefDef();
                     return false;
                 }
 
@@ -1599,8 +1883,7 @@ pub const BlockParser = struct {
                     while (i < content.len and (content[i] == ' ' or content[i] == '\t')) : (i += 1) {}
                     if (i < content.len) {
                         // Extra content, invalid
-                        partial.accumulated.deinit(self.allocator);
-                        self.partial_refdef = null;
+                        try self.abandonPartialRefDef();
                         return false;
                     }
                     // Complete!
@@ -1614,8 +1897,7 @@ pub const BlockParser = struct {
                     return true;
                 } else {
                     // Invalid content after URL
-                    partial.accumulated.deinit(self.allocator);
-                    self.partial_refdef = null;
+                    try self.abandonPartialRefDef();
                     return false;
                 }
             },
@@ -1671,8 +1953,7 @@ pub const BlockParser = struct {
 
                     if (i < line.len) {
                         // Extra content, invalid
-                        partial.accumulated.deinit(self.allocator);
-                        self.partial_refdef = null;
+                        try self.abandonPartialRefDef();
                         return false;
                     }
 
@@ -1705,6 +1986,7 @@ pub const BlockParser = struct {
         }
 
         partial.accumulated.deinit(self.allocator);
+        partial.consumed_lines.deinit(self.allocator);
         self.partial_refdef = null;
     }
 
@@ -1725,6 +2007,42 @@ pub const BlockParser = struct {
         }
 
         partial.accumulated.deinit(self.allocator);
+        partial.consumed_lines.deinit(self.allocator);
+        self.partial_refdef = null;
+    }
+
+    fn abandonPartialRefDef(self: *BlockParser) !void {
+        var partial = &self.partial_refdef.?;
+
+        // When we abandon a partial ref def, we need to output the consumed lines as normal paragraph content
+        if (partial.consumed_lines.items.len > 0) {
+            // Create a paragraph if we don't have one
+            if (self.tip.type != .paragraph) {
+                const para = try Node.create(self.arena_allocator, .paragraph);
+                para.start_line = self.line_number;
+                self.tip.appendChild(para);
+                self.tip = para;
+            }
+
+            // Add each consumed line as text nodes (like addTextToParagraph does)
+            for (partial.consumed_lines.items, 0..) |line, i| {
+                // Add softbreak between lines (except before first line)
+                if (i > 0 or self.tip.first_child != null) {
+                    const softbreak = try Node.create(self.arena_allocator, .softbreak);
+                    self.tip.appendChild(softbreak);
+                }
+
+                // Add text node
+                const text_node = try Node.create(self.arena_allocator, .text);
+                text_node.literal = try self.arena_allocator.dupe(u8, line);
+                self.tip.appendChild(text_node);
+            }
+
+            self.tip.end_line = self.line_number;
+        }
+
+        partial.accumulated.deinit(self.allocator);
+        partial.consumed_lines.deinit(self.allocator);
         self.partial_refdef = null;
     }
 

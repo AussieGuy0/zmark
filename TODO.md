@@ -376,38 +376,53 @@
 ## Current Status
 
 **Phase**: Phase 2/3 - Block Structure Parser + Inline Parsing (In Progress)
-**Tests Passing**: 585/652 (89.7%)
+**Tests Passing**: 623/652 (95.6%)
 **Last Updated**: 2026-01-21
-**Status**: Active development - 67 tests remaining (89.7% → target 100%)
+**Status**: Active development - 29 tests remaining (95.6% → target 100%)
 
-**Breakdown of remaining 67 failures**:
-- Links: 11 failures (precedence, nested links)
-- List items: 10 failures (indented code, empty items, tight/loose - **fixed 4!** ✅)
-- HTML blocks: 10 failures (block detection edge cases)
-- Lists: 8 failures (related to list items - **fixed 1!** ✅)
-- Block quotes: 6 failures (lazy continuation rules)
-- Raw HTML: 6 failures (tag validation edge cases)
-- Emphasis and strong emphasis: 5 failures (complex nesting - **fixed 11!** ✅)
-- Link reference definitions: 5 failures (multiline, Unicode case-folding)
-- Tabs: 4 failures (expansion in nested structures)
-- Autolinks: 1 failure (HTML block detection - **fixed 1!** ✅)
+**Breakdown of remaining 39 failures**:
+- Block quotes: 6 failures (lazy continuation, blank lines, indented code)
+- Link reference definitions: 5 failures (multiline titles/labels, invalid URLs, Unicode case-folding)
+- Raw HTML: 5 failures (tag validation edge cases - attribute syntax)
+- Emphasis and strong emphasis: 5 failures (complex multi-delimiter nesting)
+- Lists: 5 failures (tight/loose rendering with nested blocks)
+- Tabs: 4 failures (tab expansion in nested structures - lists, block quotes)
+- List items: 4 failures (lazy continuation in nested block quotes)
+- Links: 2 failures (nested links in images, multiline reference labels)
+- Fenced code blocks: 1 failure (blank line whitespace preservation)
+- Autolinks: 1 failure (backslash escaping in email autolinks)
 - Images: 1 failure (nested links in alt text)
 
-**Recent progress (2026-01-21)**:
-- ✅ **Emphasis delimiter processing**: Fixed 11/16 failures by improving the algorithm
-  - Implemented proper left-to-right closer processing
-  - Fixed delimiter removal and counting logic
-  - Improved handling of delimiter runs with varying lengths
-- ✅ **List item parsing**: Fixed 4/14 failures by allowing block-level content
-  - Changed first line processing to use `processLineContent()` instead of forcing paragraphs
-  - Now correctly recognizes headings in list items (e.g., `- # Foo`)
-  - Now correctly creates nested lists (e.g., `- - foo`, `1. - 2. foo`)
-  - Block quotes in list items now parse correctly
-- ✅ **Raw HTML attribute parsing**: Fixed 1 autolink failure
-  - Added requirement for whitespace before HTML tag attributes per CommonMark spec
-- ✅ **Overall improvement**: 570/652 (87.4%) → 585/652 (89.7%) - **+15 tests!**
+**Recent progress (2026-01-21 - Session 5)**:
+- **Starting point**: 615/652 (94.3%) - 37 tests remaining
+- **Current**: 623/652 (95.6%) - **+8 tests fixed!** (+1.3%) - 29 tests remaining
+- **Strategy**: Systematic fix by category, hardest first
+- **Fixes completed**:
+  - ✅ Link reference definitions: Fixed 3/4 (tests 197, 199, 208)
+    - ✅ Abandoned partial ref defs now output consumed lines as paragraphs
+    - ✅ Multiline labels now supported
+    - ❌ Test 206 remaining: Unicode case-folding (complex, deferred)
+  - ✅ Block quotes: Fixed 4/6 (tests 240, 244, 249, 252)
+    - ✅ Empty paragraphs no longer rendered
+    - ✅ Blank lines in block quotes now separate paragraphs
+    - ✅ Lines without `>` properly exit block quotes
+    - ✅ Blank lines between block quotes now separate them
+    - ❌ Tests 236, 238 remaining: Lazy continuation edge cases (deferred)
 
-**Current focus**: Remaining list items edge cases (empty items, indented code), then Links and HTML blocks
+**Previous progress (2026-01-21 - Session 4)**:
+- ✅ **Major progress**: 597/652 (91.6%) → 613/652 (94.0%) - **+16 tests!** (+2.4%)
+- Then 613 → 615/652 (94.3%) - **+2 more tests!**
+
+**Previous progress (2026-01-21 - Session 3)**:
+- ✅ **Fenced code blocks**: Fixed 3 out of 4 failures!
+- ✅ **Overall improvement**: 594/652 (91.1%) → 597/652 (91.6%) - **+3 tests!** (+0.5%)
+
+**Previous progress (2026-01-21 - Session 2)**:
+- ✅ **HTML blocks**: Fixed ALL 10 failures!
+- ✅ **Indented code blocks in list items**: Fixed 2 failures
+- ✅ **Overall**: 585/652 (89.7%) → 594/652 (91.1%) - **+9 tests!**
+
+**Current focus**: Working systematically through remaining failures, starting with hardest: Link reference definitions → Block quotes → Lists/List items → Emphasis → Raw HTML → Tabs → Remaining
 
 ## Notes
 

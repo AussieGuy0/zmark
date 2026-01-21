@@ -32,13 +32,64 @@ pub const HtmlRenderer = struct {
                 }
             },
             .paragraph => {
-                try self.buffer.appendSlice(self.allocator,"<p>");
+                // Check if paragraph is empty (only whitespace text nodes and softbreaks)
+                var has_content = false;
+                var child_check = node.first_child;
+                while (child_check) |c| {
+                    if (c.type == .text) {
+                        if (c.literal) |lit| {
+                            // Check if there's any non-whitespace
+                            for (lit) |ch| {
+                                if (ch != ' ' and ch != '\t' and ch != '\n' and ch != '\r') {
+                                    has_content = true;
+                                    break;
+                                }
+                            }
+                        }
+                    } else if (c.type != .softbreak and c.type != .linebreak) {
+                        // Non-text, non-break node means there's content
+                        has_content = true;
+                    }
+                    if (has_content) break;
+                    child_check = c.next;
+                }
+
+                // Don't render empty paragraphs
+                if (!has_content) {
+                    return;
+                }
+
+                // Check if we're in a tight list - if so, don't render <p> tags
+                var in_tight_list = false;
+                var check_parent = node.parent;
+                while (check_parent) |parent| {
+                    if (parent.type == .list_item) {
+                        // Check if this list item's parent list is tight
+                        if (parent.parent) |list| {
+                            if (list.type == .list and list.list_data != null) {
+                                if (list.list_data.?.tight) {
+                                    in_tight_list = true;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    check_parent = parent.parent;
+                }
+
+                if (!in_tight_list) {
+                    try self.buffer.appendSlice(self.allocator,"<p>");
+                }
                 var child = node.first_child;
                 while (child) |c| {
                     try self.renderNode(c);
                     child = c.next;
                 }
-                try self.buffer.appendSlice(self.allocator,"</p>\n");
+                if (!in_tight_list) {
+                    try self.buffer.appendSlice(self.allocator,"</p>\n");
+                } else {
+                    try self.buffer.appendSlice(self.allocator,"\n");
+                }
             },
             .heading => {
                 const level = node.heading_level;

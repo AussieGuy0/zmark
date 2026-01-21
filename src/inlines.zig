@@ -683,6 +683,22 @@ pub const InlineParser = struct {
                         }
                         continue;
                     }
+                    // Skip HTML tags and autolinks (anything in angle brackets)
+                    if (text[j] == '<') {
+                        var k = j + 1;
+                        // Find the closing >
+                        while (k < text.len and text[k] != '>' and text[k] != '\n') {
+                            if (text[k] == '\\' and k + 1 < text.len) {
+                                k += 2; // Skip escaped character
+                            } else {
+                                k += 1;
+                            }
+                        }
+                        if (k < text.len and text[k] == '>') {
+                            j = k + 1; // Skip past the closing >
+                            continue;
+                        }
+                    }
                     if (text[j] == '[') {
                         bracket_depth += 1;
                     } else if (text[j] == ']') {
@@ -799,13 +815,31 @@ pub const InlineParser = struct {
 
                         // Check for closing )
                         if (paren_pos < text.len and text[paren_pos] == ')') {
+                            // Extract link text
+                            const link_text = text[link_start + 1 .. cb];
+
+                            // First, parse link text to check if it contains links (for images, skip this check)
+                            if (!is_image) {
+                                const temp_container = try Node.create(self.arena_allocator, .paragraph);
+                                const was_inside_link = self.inside_link;
+                                self.inside_link = false; // Allow links in the trial parse
+                                try self.parseInlines(temp_container, link_text);
+                                self.inside_link = was_inside_link;
+
+                                // If the link text contains a link, don't create this link
+                                if (containsLink(temp_container)) {
+                                    // Just advance past the '[' and continue parsing
+                                    pos += 1;
+                                    continue;
+                                }
+                            }
+
                             // Flush any pending text
                             if (pos > text_start) {
                                 try self.addTextNode(parent, text[text_start..pos]);
                             }
 
-                            // Extract link text and URL
-                            const link_text = text[link_start + 1 .. cb];
+                            // Extract URL
                             const url = text[url_start..url_end];
 
                             // Process backslash escapes and HTML entities in URL and title
@@ -883,6 +917,25 @@ pub const InlineParser = struct {
                         defer self.allocator.free(normalized_label);
 
                         if (self.refmap.get(normalized_label)) |ref_def| {
+                            // Extract link text
+                            const link_text = text[link_start + 1 .. cb];
+
+                            // First, parse link text to check if it contains links (for images, skip this check)
+                            if (!is_image) {
+                                const temp_container = try Node.create(self.arena_allocator, .paragraph);
+                                const was_inside_link = self.inside_link;
+                                self.inside_link = false; // Allow links in the trial parse
+                                try self.parseInlines(temp_container, link_text);
+                                self.inside_link = was_inside_link;
+
+                                // If the link text contains a link, don't create this link
+                                if (containsLink(temp_container)) {
+                                    // Just advance past the '[' and continue parsing
+                                    pos += 1;
+                                    continue;
+                                }
+                            }
+
                             // Flush any pending text
                             if (pos > text_start) {
                                 try self.addTextNode(parent, text[text_start..pos]);
@@ -898,7 +951,6 @@ pub const InlineParser = struct {
                             link_node.link_title = ref_def.title;
 
                             // Parse link text as inlines (set inside_link flag to prevent nesting)
-                            const link_text = text[link_start + 1 .. cb];
                             const was_inside_link = self.inside_link;
                             self.inside_link = true;
                             try self.parseInlines(link_node, link_text);
@@ -1009,6 +1061,18 @@ pub const InlineParser = struct {
         const node = try Node.create(self.arena_allocator, .text);
         node.literal = try self.arena_allocator.dupe(u8, text);
         parent.appendChild(node);
+    }
+
+    // Check if a node or any of its descendants contains a link
+    fn containsLink(node: *Node) bool {
+        if (node.type == .link) return true;
+
+        var child = node.first_child;
+        while (child) |c| {
+            if (containsLink(c)) return true;
+            child = c.next;
+        }
+        return false;
     }
 
     // Convert line endings to spaces (for code spans)
@@ -1334,7 +1398,7 @@ pub const InlineParser = struct {
 
         var in_whitespace = false;
         var i: usize = 0;
-        while (i < label.len) : (i += 1) {
+        while (i < label.len) {
             const ch = label[i];
 
             // According to CommonMark spec, backslash escapes are NOT processed during label normalization
@@ -1345,9 +1409,78 @@ pub const InlineParser = struct {
                     try result.append(self.allocator, ' ');
                     in_whitespace = true;
                 }
-            } else {
+                i += 1;
+            } else if (ch < 128) {
+                // ASCII character - simple case folding
                 try result.append(self.allocator, std.ascii.toLower(ch));
                 in_whitespace = false;
+                i += 1;
+            } else {
+                // Multi-byte UTF-8 character - handle Unicode case-folding
+                // Handle special cases that expand when case-folded
+
+                // Check for Latin Capital Letter Sharp S (U+1E9E: ẞ) - case-folds to "ss"
+                // UTF-8 encoding: 0xE1 0xBA 0x9E
+                if (i + 2 < label.len and label[i] == 0xE1 and label[i+1] == 0xBA and label[i+2] == 0x9E) {
+                    try result.append(self.allocator, 's');
+                    try result.append(self.allocator, 's');
+                    in_whitespace = false;
+                    i += 3;
+                    continue;
+                }
+
+                // Check for Latin Small Letter Sharp S (U+00DF: ß) - case-folds to "ss"
+                // UTF-8 encoding: 0xC3 0x9F
+                if (i + 1 < label.len and label[i] == 0xC3 and label[i+1] == 0x9F) {
+                    try result.append(self.allocator, 's');
+                    try result.append(self.allocator, 's');
+                    in_whitespace = false;
+                    i += 2;
+                    continue;
+                }
+
+                // For other multi-byte characters, decode and apply case-folding
+                const bytes_len = std.unicode.utf8ByteSequenceLength(ch) catch {
+                    // Invalid UTF-8, just copy the byte
+                    try result.append(self.allocator, ch);
+                    in_whitespace = false;
+                    i += 1;
+                    continue;
+                };
+
+                if (i + bytes_len > label.len) {
+                    // Incomplete UTF-8 sequence, just copy the byte
+                    try result.append(self.allocator, ch);
+                    in_whitespace = false;
+                    i += 1;
+                    continue;
+                }
+
+                const codepoint = std.unicode.utf8Decode(label[i..i+bytes_len]) catch {
+                    // Invalid UTF-8, just copy the bytes
+                    try result.appendSlice(self.allocator, label[i..i+bytes_len]);
+                    in_whitespace = false;
+                    i += bytes_len;
+                    continue;
+                };
+
+                // Simple Unicode case-folding: convert to uppercase then to lowercase
+                // This handles most cases correctly
+                const upper = unicodeToUpper(codepoint);
+                const lower = unicodeToLower(upper);
+
+                // Encode back to UTF-8
+                var utf8_buf: [4]u8 = undefined;
+                const utf8_len = std.unicode.utf8Encode(lower, &utf8_buf) catch {
+                    // If encoding fails, use original bytes
+                    try result.appendSlice(self.allocator, label[i..i+bytes_len]);
+                    in_whitespace = false;
+                    i += bytes_len;
+                    continue;
+                };
+                try result.appendSlice(self.allocator, utf8_buf[0..utf8_len]);
+                in_whitespace = false;
+                i += bytes_len;
             }
         }
 
@@ -1369,6 +1502,32 @@ pub const InlineParser = struct {
         }
 
         return result.toOwnedSlice(self.allocator);
+    }
+
+    // Simple Unicode uppercase conversion (handles common cases)
+    fn unicodeToUpper(codepoint: u21) u21 {
+        // ASCII range
+        if (codepoint >= 'a' and codepoint <= 'z') {
+            return codepoint - 32;
+        }
+        // Latin-1 Supplement (common accented characters)
+        if (codepoint >= 0xE0 and codepoint <= 0xFE and codepoint != 0xF7) {
+            return codepoint - 32;
+        }
+        return codepoint;
+    }
+
+    // Simple Unicode lowercase conversion (handles common cases)
+    fn unicodeToLower(codepoint: u21) u21 {
+        // ASCII range
+        if (codepoint >= 'A' and codepoint <= 'Z') {
+            return codepoint + 32;
+        }
+        // Latin-1 Supplement (common accented characters)
+        if (codepoint >= 0xC0 and codepoint <= 0xDE and codepoint != 0xD7) {
+            return codepoint + 32;
+        }
+        return codepoint;
     }
 
     fn processEscapes(self: *InlineParser, text: []const u8) ![]const u8 {
