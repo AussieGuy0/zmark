@@ -10,6 +10,7 @@ pub const InlineParser = struct {
     arena_allocator: std.mem.Allocator,
     refmap: *const std.StringHashMap(RefDef),
     inside_link: bool, // Track if we're parsing inside a link (no nested links allowed)
+    inside_image: bool, // Track if we're parsing inside an image alt text
 
     pub fn init(allocator: std.mem.Allocator, arena_allocator: std.mem.Allocator, refmap: *const std.StringHashMap(RefDef)) InlineParser {
         return InlineParser{
@@ -17,6 +18,7 @@ pub const InlineParser = struct {
             .arena_allocator = arena_allocator,
             .refmap = refmap,
             .inside_link = false,
+            .inside_image = false,
         };
     }
 
@@ -310,9 +312,9 @@ pub const InlineParser = struct {
             if (!right_flanking) {
                 return true;
             }
-            // Check if preceded by punctuation
-            const before_char: ?u8 = if (pos > 0) text[pos - 1] else null;
-            if (before_char != null and isUnicodePunctuation(before_char.?)) {
+            // Check if preceded by punctuation (using full Unicode codepoint)
+            const before_cp = getCodepointBefore(text, pos);
+            if (before_cp != null and isUnicodePunctuationCodepoint(before_cp.?)) {
                 return true;
             }
             return false;
@@ -339,10 +341,10 @@ pub const InlineParser = struct {
             if (!left_flanking) {
                 return true;
             }
-            // Check if followed by punctuation
+            // Check if followed by punctuation (using full Unicode codepoint)
             const after_pos = pos + length;
-            const after_char: ?u8 = if (after_pos < text.len) text[after_pos] else null;
-            if (after_char != null and isUnicodePunctuation(after_char.?)) {
+            const after_cp = getCodepointAfter(text, after_pos);
+            if (after_cp != null and isUnicodePunctuationCodepoint(after_cp.?)) {
                 return true;
             }
             return false;
@@ -738,7 +740,9 @@ pub const InlineParser = struct {
 
             // Check for link or image
             // Skip link parsing if we're already inside a link (no nested links allowed)
-            if ((ch == '[' or (ch == '!' and pos + 1 < text.len and text[pos + 1] == '[')) and (!self.inside_link or ch == '!')) {
+            // Note: images inside image alt text ARE allowed - they just render as text
+            if ((ch == '[' or (ch == '!' and pos + 1 < text.len and text[pos + 1] == '[')) and
+                ((ch == '[' and !self.inside_link) or ch == '!')) {
                 const is_image = (ch == '!');
                 const link_start = if (is_image) pos + 1 else pos;
 
@@ -963,11 +967,18 @@ pub const InlineParser = struct {
                             link_node.link_url = try self.arena_allocator.dupe(u8, processed_url);
                             link_node.link_title = if (processed_title) |pt| try self.arena_allocator.dupe(u8, pt) else null;
 
-                            // Parse link text as inlines (set inside_link flag to prevent nesting)
-                            const was_inside_link = self.inside_link;
-                            self.inside_link = true;
-                            try self.parseInlines(link_node, link_text);
-                            self.inside_link = was_inside_link;
+                            // Parse link/image text as inlines (set inside_link/inside_image flag to prevent nesting)
+                            if (is_image) {
+                                const was_inside_image = self.inside_image;
+                                self.inside_image = true;
+                                try self.parseInlines(link_node, link_text);
+                                self.inside_image = was_inside_image;
+                            } else {
+                                const was_inside_link = self.inside_link;
+                                self.inside_link = true;
+                                try self.parseInlines(link_node, link_text);
+                                self.inside_link = was_inside_link;
+                            }
 
                             parent.appendChild(link_node);
 
@@ -1053,11 +1064,18 @@ pub const InlineParser = struct {
                             link_node.link_url = ref_def.url;
                             link_node.link_title = ref_def.title;
 
-                            // Parse link text as inlines (set inside_link flag to prevent nesting)
-                            const was_inside_link = self.inside_link;
-                            self.inside_link = true;
-                            try self.parseInlines(link_node, link_text);
-                            self.inside_link = was_inside_link;
+                            // Parse link/image text as inlines (set inside_link/inside_image flag to prevent nesting)
+                            if (is_image) {
+                                const was_inside_image = self.inside_image;
+                                self.inside_image = true;
+                                try self.parseInlines(link_node, link_text);
+                                self.inside_image = was_inside_image;
+                            } else {
+                                const was_inside_link = self.inside_link;
+                                self.inside_link = true;
+                                try self.parseInlines(link_node, link_text);
+                                self.inside_link = was_inside_link;
+                            }
 
                             parent.appendChild(link_node);
 
@@ -1652,6 +1670,10 @@ pub const InlineParser = struct {
         if (codepoint >= 0xE0 and codepoint <= 0xFE and codepoint != 0xF7) {
             return codepoint - 32;
         }
+        // Greek lowercase to uppercase (U+03B1-U+03C9 -> U+0391-U+03A9)
+        if (codepoint >= 0x03B1 and codepoint <= 0x03C9) {
+            return codepoint - 0x20;
+        }
         return codepoint;
     }
 
@@ -1664,6 +1686,10 @@ pub const InlineParser = struct {
         // Latin-1 Supplement (common accented characters)
         if (codepoint >= 0xC0 and codepoint <= 0xDE and codepoint != 0xD7) {
             return codepoint + 32;
+        }
+        // Greek uppercase to lowercase (U+0391-U+03A9 -> U+03B1-U+03C9)
+        if (codepoint >= 0x0391 and codepoint <= 0x03A9) {
+            return codepoint + 0x20;
         }
         return codepoint;
     }

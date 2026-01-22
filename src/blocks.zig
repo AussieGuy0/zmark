@@ -1695,6 +1695,7 @@ pub const BlockParser = struct {
         if (i >= line.len) {
             // URL must be on next line
             const normalized_label = try self.normalizeLabel(label);
+            if (normalized_label.len == 0) return false; // Empty label after normalization
             var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
             try consumed_lines.append(self.allocator, self.current_line_original);
             self.partial_refdef = PartialRefDef{
@@ -1726,6 +1727,7 @@ pub const BlockParser = struct {
         if (i >= line.len) {
             // Title might be on next line, or definition might be complete
             const normalized_label = try self.normalizeLabel(label);
+            if (normalized_label.len == 0) return false; // Empty label after normalization
             const processed_url = try self.processEscapes(url);
             var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
             try consumed_lines.append(self.allocator, self.current_line_original);
@@ -1760,6 +1762,7 @@ pub const BlockParser = struct {
 
             // Store complete definition
             const normalized_label = try self.normalizeLabel(label);
+            if (normalized_label.len == 0) return false; // Empty label after normalization
             const processed_url = try self.processEscapesAndEntities(url);
             const processed_title = if (title_result.title) |t| try self.processEscapesAndEntities(t) else null;
             const ref_def = RefDef{
@@ -1775,6 +1778,7 @@ pub const BlockParser = struct {
         } else if (title_result.started) {
             // Title started but not complete - need more lines
             const normalized_label = try self.normalizeLabel(label);
+            if (normalized_label.len == 0) return false; // Empty label after normalization
             const processed_url = try self.processEscapesAndEntities(url);
             var consumed_lines = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
             try consumed_lines.append(self.allocator, self.current_line_original);
@@ -1927,6 +1931,8 @@ pub const BlockParser = struct {
                         // Must be followed by :
                         if (i >= line.len or line[i] != ':') {
                             // Not a valid ref def
+                            // Remove the current line from consumed_lines since it will be processed normally
+                            _ = partial.consumed_lines.pop();
                             try self.abandonPartialRefDef();
                             return false;
                         }
@@ -1934,6 +1940,13 @@ pub const BlockParser = struct {
 
                         // Normalize the label
                         const label = try self.normalizeLabel(partial.accumulated.items);
+                        if (label.len == 0) {
+                            // Empty label after normalization - invalid
+                            // Remove the current line from consumed_lines since it will be processed normally
+                            _ = partial.consumed_lines.pop();
+                            try self.abandonPartialRefDef();
+                            return false;
+                        }
 
                         // Skip whitespace
                         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
@@ -1950,6 +1963,8 @@ pub const BlockParser = struct {
                         // Parse URL
                         const url_result = try self.parseUrl(line, i);
                         if (url_result.url == null) {
+                            // Remove the current line from consumed_lines since it will be processed normally
+                            _ = partial.consumed_lines.pop();
                             try self.abandonPartialRefDef();
                             return false;
                         }
@@ -1978,6 +1993,7 @@ pub const BlockParser = struct {
                         const has_whitespace = (i > pos_before_ws);
                         if (!has_whitespace) {
                             // Content after URL without whitespace - invalid
+                            _ = partial.consumed_lines.pop();
                             try self.abandonPartialRefDef();
                             return false;
                         }
@@ -1991,6 +2007,7 @@ pub const BlockParser = struct {
 
                             // Must be at end of line
                             if (i < line.len) {
+                                _ = partial.consumed_lines.pop();
                                 try self.abandonPartialRefDef();
                                 return false;
                             }
@@ -2023,11 +2040,13 @@ pub const BlockParser = struct {
                             return true;
                         } else {
                             // No title found, but there's content after URL - invalid
+                            _ = partial.consumed_lines.pop();
                             try self.abandonPartialRefDef();
                             return false;
                         }
                     } else if (line[i] == '[') {
                         // Unescaped [ inside label is not allowed
+                        _ = partial.consumed_lines.pop();
                         try self.abandonPartialRefDef();
                         return false;
                     }
@@ -2043,6 +2062,7 @@ pub const BlockParser = struct {
                 const url_result = try self.parseUrl(content, 0);
                 if (url_result.url == null) {
                     // Invalid, abandon partial refdef
+                    _ = partial.consumed_lines.pop();
                     try self.abandonPartialRefDef();
                     return false;
                 }
@@ -2067,6 +2087,7 @@ pub const BlockParser = struct {
                     while (i < content.len and (content[i] == ' ' or content[i] == '\t')) : (i += 1) {}
                     if (i < content.len) {
                         // Extra content, invalid
+                        _ = partial.consumed_lines.pop();
                         try self.abandonPartialRefDef();
                         return false;
                     }
@@ -2081,6 +2102,7 @@ pub const BlockParser = struct {
                     return true;
                 } else {
                     // Invalid content after URL
+                    _ = partial.consumed_lines.pop();
                     try self.abandonPartialRefDef();
                     return false;
                 }
@@ -2137,6 +2159,7 @@ pub const BlockParser = struct {
 
                     if (i < line.len) {
                         // Extra content, invalid
+                        _ = partial.consumed_lines.pop();
                         try self.abandonPartialRefDef();
                         return false;
                     }
@@ -2236,7 +2259,7 @@ pub const BlockParser = struct {
 
         var in_whitespace = false;
         var i: usize = 0;
-        while (i < label.len) : (i += 1) {
+        while (i < label.len) {
             const ch = label[i];
 
             // According to CommonMark spec, backslash escapes are NOT processed during label normalization
@@ -2247,22 +2270,126 @@ pub const BlockParser = struct {
                     try result.append(self.allocator, ' ');
                     in_whitespace = true;
                 }
-            } else {
+                i += 1;
+            } else if (ch < 128) {
+                // ASCII character - simple case folding
                 try result.append(self.allocator, std.ascii.toLower(ch));
                 in_whitespace = false;
+                i += 1;
+            } else {
+                // Multi-byte UTF-8 character - handle Unicode case-folding
+
+                // Check for Latin Capital Letter Sharp S (U+1E9E: ẞ) - case-folds to "ss"
+                // UTF-8 encoding: 0xE1 0xBA 0x9E
+                if (i + 2 < label.len and label[i] == 0xE1 and label[i+1] == 0xBA and label[i+2] == 0x9E) {
+                    try result.append(self.allocator, 's');
+                    try result.append(self.allocator, 's');
+                    in_whitespace = false;
+                    i += 3;
+                    continue;
+                }
+
+                // Check for Latin Small Letter Sharp S (U+00DF: ß) - case-folds to "ss"
+                // UTF-8 encoding: 0xC3 0x9F
+                if (i + 1 < label.len and label[i] == 0xC3 and label[i+1] == 0x9F) {
+                    try result.append(self.allocator, 's');
+                    try result.append(self.allocator, 's');
+                    in_whitespace = false;
+                    i += 2;
+                    continue;
+                }
+
+                // For other multi-byte characters, decode and apply case-folding
+                const bytes_len = std.unicode.utf8ByteSequenceLength(ch) catch {
+                    // Invalid UTF-8, just copy the byte
+                    try result.append(self.allocator, ch);
+                    in_whitespace = false;
+                    i += 1;
+                    continue;
+                };
+
+                if (i + bytes_len > label.len) {
+                    // Incomplete UTF-8 sequence, just copy the byte
+                    try result.append(self.allocator, ch);
+                    in_whitespace = false;
+                    i += 1;
+                    continue;
+                }
+
+                const codepoint = std.unicode.utf8Decode(label[i..i+bytes_len]) catch {
+                    // Invalid UTF-8, just copy the bytes
+                    try result.appendSlice(self.allocator, label[i..i+bytes_len]);
+                    in_whitespace = false;
+                    i += bytes_len;
+                    continue;
+                };
+
+                // Simple Unicode case-folding: convert to uppercase then to lowercase
+                // This handles most cases correctly
+                const upper = unicodeToUpper(codepoint);
+                const lower = unicodeToLower(upper);
+
+                // Encode back to UTF-8
+                var utf8_buf: [4]u8 = undefined;
+                const utf8_len = std.unicode.utf8Encode(lower, &utf8_buf) catch {
+                    // If encoding fails, use original bytes
+                    try result.appendSlice(self.allocator, label[i..i+bytes_len]);
+                    in_whitespace = false;
+                    i += bytes_len;
+                    continue;
+                };
+                try result.appendSlice(self.allocator, utf8_buf[0..utf8_len]);
+                in_whitespace = false;
+                i += bytes_len;
             }
         }
 
         // Trim
         var s = result.items;
-        while (s.len > 0 and s[0] == ' ') {
-            s = s[1..];
+        var start: usize = 0;
+        while (start < s.len and s[start] == ' ') {
+            start += 1;
         }
-        while (s.len > 0 and s[s.len - 1] == ' ') {
-            s = s[0 .. s.len - 1];
+        var end: usize = s.len;
+        while (end > start and s[end - 1] == ' ') {
+            end -= 1;
         }
 
-        return self.arena_allocator.dupe(u8, s);
+        return self.arena_allocator.dupe(u8, s[start..end]);
+    }
+
+    // Simple Unicode uppercase conversion (handles common cases)
+    fn unicodeToUpper(codepoint: u21) u21 {
+        // ASCII range
+        if (codepoint >= 'a' and codepoint <= 'z') {
+            return codepoint - 32;
+        }
+        // Latin-1 Supplement (common accented characters)
+        if (codepoint >= 0xE0 and codepoint <= 0xFE and codepoint != 0xF7) {
+            return codepoint - 32;
+        }
+        // Greek lowercase to uppercase (U+03B1-U+03C9 -> U+0391-U+03A9)
+        if (codepoint >= 0x03B1 and codepoint <= 0x03C9) {
+            return codepoint - 0x20;
+        }
+        return codepoint;
+    }
+
+    // Simple Unicode lowercase conversion (handles common cases)
+    fn unicodeToLower(codepoint: u21) u21 {
+        // ASCII range
+        if (codepoint >= 'A' and codepoint <= 'Z') {
+            return codepoint + 32;
+        }
+        // Latin-1 Supplement (common accented characters)
+        if (codepoint >= 0xC0 and codepoint <= 0xDE and codepoint != 0xD7) {
+            return codepoint + 32;
+        }
+        // Greek uppercase to lowercase (U+0391-U+03A9 -> U+03B1-U+03C9)
+        if (codepoint >= 0x0391 and codepoint <= 0x03A9) {
+            return codepoint + 0x20;
+        }
+        return codepoint;
     }
 
     fn processEscapes(self: *BlockParser, text: []const u8) ![]const u8 {
