@@ -1374,23 +1374,107 @@ pub const BlockParser = struct {
             }
         }
 
-        // Parse attributes (simplified - just skip to >)
-        while (i < line.len and line[i] != '>') : (i += 1) {
-            // If we encounter a newline before >, it's not complete
-            if (line[i] == '\n') return false;
-        }
+        // Parse attributes with proper validation
+        // Note: HTML tags can span multiple lines (newlines count as whitespace)
+        while (i < line.len) {
+            const whitespace_start = i;
+            // Skip whitespace (including newlines per CommonMark spec)
+            while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\n')) : (i += 1) {}
 
-        // Must end with >
-        if (i >= line.len) return false;
-        i += 1; // Skip >
+            if (i >= line.len) return false;
 
-        // Rest of line must be whitespace
-        while (i < line.len) : (i += 1) {
-            if (line[i] != ' ' and line[i] != '\t' and line[i] != '\n') {
+            // Check for end of tag
+            if (line[i] == '>') {
+                i += 1; // Skip >
+                // Rest of line must be whitespace
+                while (i < line.len) : (i += 1) {
+                    if (line[i] != ' ' and line[i] != '\t' and line[i] != '\n') {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // Check for self-closing tag
+            if (line[i] == '/' and i + 1 < line.len and line[i + 1] == '>') {
+                i += 2;
+                // Rest of line must be whitespace
+                while (i < line.len) : (i += 1) {
+                    if (line[i] != ' ' and line[i] != '\t' and line[i] != '\n') {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // If we're about to parse an attribute, we MUST have consumed whitespace
+            if (i == whitespace_start) {
+                // No whitespace before attribute - invalid
                 return false;
             }
+
+            // Parse attribute name - must start with ASCII letter, _, or :
+            if (!isAlpha(line[i]) and line[i] != '_' and line[i] != ':') {
+                return false;
+            }
+
+            // Attribute name can contain ASCII letters, digits, _, :, ., or -
+            while (i < line.len and (isAlphaNum(line[i]) or line[i] == '_' or line[i] == ':' or line[i] == '.' or line[i] == '-')) : (i += 1) {}
+
+            if (i >= line.len) return false;
+
+            // Skip whitespace after attribute name (including newlines)
+            while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\n')) : (i += 1) {}
+
+            if (i >= line.len) return false;
+
+            // Check for attribute value
+            if (line[i] == '=') {
+                i += 1;
+
+                // Skip whitespace after = (including newlines)
+                while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\n')) : (i += 1) {}
+
+                if (i >= line.len) return false;
+
+                // Parse attribute value
+                if (line[i] == '"') {
+                    // Double-quoted value - can span lines
+                    i += 1;
+                    while (i < line.len and line[i] != '"') {
+                        // Backslash before quote is invalid in HTML
+                        if (line[i] == '\\' and i + 1 < line.len and line[i + 1] == '"') {
+                            return false;
+                        }
+                        i += 1;
+                    }
+                    if (i >= line.len or line[i] != '"') return false;
+                    i += 1; // Skip closing quote
+                } else if (line[i] == '\'') {
+                    // Single-quoted value - can span lines
+                    i += 1;
+                    while (i < line.len and line[i] != '\'') {
+                        // Backslash before quote is invalid in HTML
+                        if (line[i] == '\\' and i + 1 < line.len and line[i + 1] == '\'') {
+                            return false;
+                        }
+                        i += 1;
+                    }
+                    if (i >= line.len or line[i] != '\'') return false;
+                    i += 1; // Skip closing quote
+                } else {
+                    // Unquoted value - must not contain space, tab, newline, ", ', =, <, >, or `
+                    const val_start = i;
+                    while (i < line.len and line[i] != ' ' and line[i] != '\t' and line[i] != '\n' and
+                           line[i] != '>' and line[i] != '"' and line[i] != '\'' and
+                           line[i] != '=' and line[i] != '<' and line[i] != '`') : (i += 1) {}
+                    // Must have at least one character
+                    if (i == val_start) return false;
+                }
+            }
         }
-        return true;
+
+        return false;
     }
 
     fn isAlpha(ch: u8) bool {

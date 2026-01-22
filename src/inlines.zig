@@ -109,16 +109,93 @@ pub const InlineParser = struct {
         };
     }
 
-    // Check if a character is Unicode punctuation
-    // Unicode punctuation: P or S general categories (approximated with ASCII punctuation)
-    // For full Unicode support, we'd need to check Unicode categories, but for ASCII we can use:
-    fn isUnicodePunctuation(ch: u8) bool {
+    // Check if a Unicode codepoint is punctuation
+    // Unicode punctuation: P or S general categories
+    // This includes ASCII punctuation, plus Unicode punctuation and symbols (including currency symbols)
+    fn isUnicodePunctuationCodepoint(codepoint: u21) bool {
         // ASCII punctuation characters
-        return switch (ch) {
-            '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/',
-            ':', ';', '<', '=', '>', '?', '@', '[', '\\', ']', '^', '_', '`', '{', '|', '}', '~' => true,
-            else => false,
-        };
+        if ((codepoint >= 0x21 and codepoint <= 0x2F) or
+            (codepoint >= 0x3A and codepoint <= 0x40) or
+            (codepoint >= 0x5B and codepoint <= 0x60) or
+            (codepoint >= 0x7B and codepoint <= 0x7E))
+        {
+            return true;
+        }
+
+        // Latin-1 punctuation and symbols (includes currency symbols £, ¤, ¥, etc.)
+        if (codepoint >= 0xA0 and codepoint <= 0xBF) {
+            return true;
+        }
+
+        // General punctuation block
+        if (codepoint >= 0x2000 and codepoint <= 0x206F) {
+            return true;
+        }
+
+        // Currency symbols (includes €)
+        if (codepoint >= 0x20A0 and codepoint <= 0x20CF) {
+            return true;
+        }
+
+        // Additional common punctuation ranges
+        if (codepoint >= 0x2E00 and codepoint <= 0x2E7F) { // Supplemental punctuation
+            return true;
+        }
+
+        // Other common symbols
+        if ((codepoint >= 0x2190 and codepoint <= 0x21FF) or // Arrows
+            (codepoint >= 0x2200 and codepoint <= 0x22FF) or // Mathematical operators
+            (codepoint >= 0x2300 and codepoint <= 0x23FF) or // Miscellaneous technical
+            (codepoint >= 0x2400 and codepoint <= 0x243F) or // Control pictures
+            (codepoint >= 0x2440 and codepoint <= 0x245F) or // OCR
+            (codepoint >= 0x2460 and codepoint <= 0x24FF) or // Enclosed alphanumerics
+            (codepoint >= 0x2500 and codepoint <= 0x257F) or // Box drawing
+            (codepoint >= 0x2580 and codepoint <= 0x259F) or // Block elements
+            (codepoint >= 0x25A0 and codepoint <= 0x25FF) or // Geometric shapes
+            (codepoint >= 0x2600 and codepoint <= 0x26FF) or // Miscellaneous symbols
+            (codepoint >= 0x2700 and codepoint <= 0x27BF))   // Dingbats
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    // Check if a character (byte sequence) at position is Unicode punctuation
+    fn isUnicodePunctuation(ch: u8) bool {
+        // For ASCII, check directly
+        return isUnicodePunctuationCodepoint(ch);
+    }
+
+    // Get the Unicode codepoint after a position (returns null if at end or on error)
+    fn getCodepointAfter(text: []const u8, pos: usize) ?u21 {
+        if (pos >= text.len) return null;
+
+        const byte_len = std.unicode.utf8ByteSequenceLength(text[pos]) catch return null;
+        if (pos + byte_len > text.len) return null;
+
+        return std.unicode.utf8Decode(text[pos..pos+byte_len]) catch null;
+    }
+
+    // Get the Unicode codepoint before a position (returns null if at start or on error)
+    fn getCodepointBefore(text: []const u8, pos: usize) ?u21 {
+        if (pos == 0) return null;
+
+        // Scan backwards to find the start of the UTF-8 sequence
+        var i: usize = pos;
+        while (i > 0) : (i -= 1) {
+            const byte = text[i - 1];
+            // Check if this is the start of a UTF-8 sequence (not a continuation byte)
+            if ((byte & 0x80) == 0 or (byte & 0xC0) == 0xC0) {
+                const start = i - 1;
+                const byte_len = std.unicode.utf8ByteSequenceLength(text[start]) catch return null;
+                if (start + byte_len != pos) return null; // Not immediately before pos
+                return std.unicode.utf8Decode(text[start..pos]) catch null;
+            }
+            // Don't scan back more than 4 bytes (max UTF-8 sequence length)
+            if (pos - i >= 4) return null;
+        }
+        return null;
     }
 
     // Check if a delimiter run is left-flanking
@@ -129,26 +206,39 @@ pub const InlineParser = struct {
     fn isLeftFlanking(text: []const u8, pos: usize, length: usize) bool {
         const after_pos = pos + length;
 
-        // Get the character after the delimiter run
-        const after_char: ?u8 = if (after_pos < text.len) text[after_pos] else null;
+        // Get the codepoint after the delimiter run
+        const after_cp = getCodepointAfter(text, after_pos);
 
-        // Get the character before the delimiter run
-        const before_char: ?u8 = if (pos > 0) text[pos - 1] else null;
+        // Get the codepoint before the delimiter run
+        const before_cp = getCodepointBefore(text, pos);
 
         // (1) not followed by Unicode whitespace
         // Beginning and end of line count as whitespace
-        if (after_char == null or isUnicodeWhitespace(after_char.?)) {
+        if (after_cp == null) {
+            return false;
+        }
+
+        // Check if it's ASCII whitespace or non-breaking space
+        if (after_cp.? <= 0xFF and isUnicodeWhitespace(@intCast(after_cp.?))) {
             return false;
         }
 
         // (2a) not followed by Unicode punctuation
-        if (!isUnicodePunctuation(after_char.?)) {
+        if (!isUnicodePunctuationCodepoint(after_cp.?)) {
             return true;
         }
 
         // (2b) followed by Unicode punctuation AND preceded by whitespace or punctuation
-        // Beginning and end of line count as whitespace
-        if (before_char == null or isUnicodeWhitespace(before_char.?) or isUnicodePunctuation(before_char.?)) {
+        // Note: null (beginning of line) counts as whitespace
+        if (before_cp == null) {
+            return true;
+        }
+
+        if (before_cp.? <= 0xFF and isUnicodeWhitespace(@intCast(before_cp.?))) {
+            return true;
+        }
+
+        if (isUnicodePunctuationCodepoint(before_cp.?)) {
             return true;
         }
 
@@ -163,26 +253,39 @@ pub const InlineParser = struct {
     fn isRightFlanking(text: []const u8, pos: usize, length: usize) bool {
         const after_pos = pos + length;
 
-        // Get the character after the delimiter run
-        const after_char: ?u8 = if (after_pos < text.len) text[after_pos] else null;
+        // Get the codepoint after the delimiter run
+        const after_cp = getCodepointAfter(text, after_pos);
 
-        // Get the character before the delimiter run
-        const before_char: ?u8 = if (pos > 0) text[pos - 1] else null;
+        // Get the codepoint before the delimiter run
+        const before_cp = getCodepointBefore(text, pos);
 
         // (1) not preceded by Unicode whitespace
         // Beginning and end of line count as whitespace
-        if (before_char == null or isUnicodeWhitespace(before_char.?)) {
+        if (before_cp == null) {
+            return false;
+        }
+
+        // Check if it's ASCII whitespace or non-breaking space
+        if (before_cp.? <= 0xFF and isUnicodeWhitespace(@intCast(before_cp.?))) {
             return false;
         }
 
         // (2a) not preceded by Unicode punctuation
-        if (!isUnicodePunctuation(before_char.?)) {
+        if (!isUnicodePunctuationCodepoint(before_cp.?)) {
             return true;
         }
 
         // (2b) preceded by Unicode punctuation AND followed by whitespace or punctuation
-        // Beginning and end of line count as whitespace
-        if (after_char == null or isUnicodeWhitespace(after_char.?) or isUnicodePunctuation(after_char.?)) {
+        // Note: null (end of line) counts as whitespace
+        if (after_cp == null) {
+            return true;
+        }
+
+        if (after_cp.? <= 0xFF and isUnicodeWhitespace(@intCast(after_cp.?))) {
+            return true;
+        }
+
+        if (isUnicodePunctuationCodepoint(after_cp.?)) {
             return true;
         }
 
@@ -1052,7 +1155,21 @@ pub const InlineParser = struct {
 
         // Process emphasis delimiters
         if (delimiters.items.len > 0) {
-            try self.processEmphasisStack(parent, delimiters.items[0]);
+            // Create a sentinel node for the bottom of the stack
+            var stack_bottom = Delimiter{
+                .char = 0,
+                .num = 0,
+                .orig_num = 0,
+                .node = undefined, // Won't be used
+                .can_open = false,
+                .can_close = false,
+                .prev = null,
+                .next = delimiters.items[0],
+            };
+            // Link the first delimiter to the sentinel
+            delimiters.items[0].prev = &stack_bottom;
+
+            try self.processEmphasisStack(parent, &stack_bottom);
         }
     }
 
@@ -1218,9 +1335,23 @@ pub const InlineParser = struct {
 
         const ch = text[i];
 
-        // HTML comment: <!--
+        // HTML comment
+        // Per spec: Valid forms are: <!-->  or  <!--->  or  <!-- text -->
+        // where text does not contain -->
         if (ch == '!' and i + 2 < text.len and text[i + 1] == '-' and text[i + 2] == '-') {
             i += 3;
+
+            // Special case: <!--> (empty comment)
+            if (i < text.len and text[i] == '>') {
+                return i + 1 - pos;
+            }
+
+            // Special case: <!---> (comment with single dash)
+            if (i + 1 < text.len and text[i] == '-' and text[i + 1] == '>') {
+                return i + 2 - pos;
+            }
+
+            // General case: <!-- text --> where text doesn't contain -->
             // Find closing -->
             while (i + 2 < text.len) {
                 if (text[i] == '-' and text[i + 1] == '-' and text[i + 2] == '>') {
@@ -1339,18 +1470,19 @@ pub const InlineParser = struct {
 
                 if (i >= text.len) return null;
 
-                // Skip whitespace
-                while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n')) {
-                    i += 1;
+                // Peek ahead for = (with optional whitespace before it)
+                var peek = i;
+                while (peek < text.len and (text[peek] == ' ' or text[peek] == '\t' or text[peek] == '\n')) {
+                    peek += 1;
                 }
 
-                if (i >= text.len) return null;
-
                 // Check for attribute value
-                if (text[i] == '=') {
-                    i += 1;
+                if (peek < text.len and text[peek] == '=') {
+                    // Skip whitespace before =
+                    i = peek;
+                    i += 1; // Skip =
 
-                    // Skip whitespace
+                    // Skip whitespace after =
                     while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n')) {
                         i += 1;
                     }
@@ -1362,6 +1494,10 @@ pub const InlineParser = struct {
                         const quote = text[i];
                         i += 1;
                         while (i < text.len and text[i] != quote) {
+                            // In HTML, backslash before quote is invalid (would prematurely end the value)
+                            if (text[i] == '\\' and i + 1 < text.len and text[i + 1] == quote) {
+                                return null;
+                            }
                             i += 1;
                         }
                         if (i >= text.len) return null;
@@ -1373,6 +1509,8 @@ pub const InlineParser = struct {
                         }
                     }
                 }
+                // If no =, leave i after attribute name (don't consume whitespace)
+                // The loop will consume it at the start of the next iteration
             }
             return null;
         }
