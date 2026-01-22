@@ -194,13 +194,35 @@ pub const BlockParser = struct {
 
         // Try to match each container on the path
         var current_offset: usize = 0;
+        var current_column: usize = 0;
         var matched_container = self.root;
 
         for (path.items) |container| {
-            const matched = try self.matchContainer(container, line, &current_offset, is_blank);
+            const matched = try self.matchContainer(container, line, &current_offset, &current_column, is_blank);
             if (!matched) break;
             matched_container = container;
         }
+
+        // Calculate the actual column position where remaining content starts
+        // This accounts for tabs in the consumed portion
+        var actual_column: usize = 0;
+        for (line[0..current_offset]) |ch| {
+            if (ch == '\t') {
+                actual_column += 4 - (actual_column % 4);
+            } else {
+                actual_column += 1;
+            }
+        }
+
+        // If we consumed partial tabs, we need to prepend spaces for the unused portion
+        const partial_tab_spaces = if (actual_column > current_column) actual_column - current_column else 0;
+
+        // The column offset for indentation processing
+        // After prepending spaces, content effectively starts at (actual_column - partial_tab_spaces)
+        const content_column = if (partial_tab_spaces > 0) actual_column - partial_tab_spaces else actual_column;
+
+        // Store the column for use in indentation processing
+        self.column = content_column;
 
         // Close unmatched containers
         while (self.tip != matched_container) {
@@ -224,7 +246,19 @@ pub const BlockParser = struct {
         }
 
         // Get remaining line content after container markers
-        const remaining = if (current_offset < line.len) line[current_offset..] else "";
+        var remaining = if (current_offset < line.len) line[current_offset..] else "";
+
+        // If we consumed partial tabs, prepend spaces for the unused portion
+        // but keep the rest of the content (including tabs) intact
+        if (partial_tab_spaces > 0 and remaining.len > 0) {
+            var buffer = try std.ArrayList(u8).initCapacity(self.arena_allocator, partial_tab_spaces + remaining.len);
+            var i: usize = 0;
+            while (i < partial_tab_spaces) : (i += 1) {
+                try buffer.append(self.arena_allocator, ' ');
+            }
+            try buffer.appendSlice(self.arena_allocator, remaining);
+            remaining = try buffer.toOwnedSlice(self.arena_allocator);
+        }
 
         // If we're in an HTML block, handle it after matching containers
         if (self.in_html_block) {
@@ -423,19 +457,22 @@ pub const BlockParser = struct {
         return false;
     }
 
-    fn matchContainer(self: *BlockParser, container: *Node, line: []const u8, offset: *usize, is_blank: bool) !bool {
+    fn matchContainer(self: *BlockParser, container: *Node, line: []const u8, offset: *usize, column: *usize, is_blank: bool) !bool {
         switch (container.type) {
             .block_quote => {
                 // Blank lines don't match block quotes (they close them)
                 if (is_blank) return false;
 
-                // Save offset before skipping spaces (in case of lazy continuation)
+                // Save offset and column before skipping spaces (in case of lazy continuation)
                 const saved_offset = offset.*;
+                const saved_column = column.*;
 
                 // Skip up to 3 spaces
                 const indent = utils.calculateIndentation(line[offset.*..]);
                 const to_skip = @min(indent, 3);
-                offset.* += utils.skipSpaces(line[offset.*..], to_skip);
+                const bytes_skipped = utils.skipSpaces(line[offset.*..], to_skip);
+                offset.* += bytes_skipped;
+                column.* += to_skip;
 
                 if (offset.* >= line.len or line[offset.*] != '>') {
                     // No '>' marker - check if we can do lazy continuation
@@ -447,6 +484,7 @@ pub const BlockParser = struct {
                         const remaining_line = if (saved_offset < line.len) line[saved_offset..] else "";
                         if (looksLikeStructuralElement(remaining_line)) {
                             offset.* = saved_offset; // Restore offset before failing
+                            column.* = saved_column;
                             return false;
                         }
 
@@ -456,6 +494,7 @@ pub const BlockParser = struct {
                                 // We're in a paragraph inside this block quote
                                 // Allow lazy continuation (don't consume anything - restore offset)
                                 offset.* = saved_offset;
+                                column.* = saved_column;
                                 self.is_lazy_continuation = true;
                                 return true;
                             }
@@ -464,15 +503,27 @@ pub const BlockParser = struct {
                     }
                     // No lazy continuation possible - restore offset and fail
                     offset.* = saved_offset;
+                    column.* = saved_column;
                     return false;
                 }
 
                 // Consume '>'
                 offset.* += 1;
+                column.* += 1;
 
                 // Consume optional space after '>'
-                if (offset.* < line.len and (line[offset.*] == ' ' or line[offset.*] == '\t')) {
-                    offset.* += 1;
+                // Per CommonMark spec: "the character > together with a following optional space of indentation"
+                // For tabs, we consume 1 column worth but don't consume the tab byte itself
+                // (partial tab handling is done later in content processing)
+                if (offset.* < line.len) {
+                    if (line[offset.*] == ' ') {
+                        offset.* += 1;
+                        column.* += 1;
+                    } else if (line[offset.*] == '\t') {
+                        // Consume 1 column from the tab, but don't consume the tab byte
+                        // The remaining columns from the tab will be handled during content processing
+                        column.* += 1;
+                    }
                 }
 
                 return true;
@@ -488,16 +539,18 @@ pub const BlockParser = struct {
 
                 // Check if line is indented enough to be part of this list item
                 const item_indent = container.indent;
-                const line_indent = utils.calculateIndentation(line[offset.*..]);
-                const absolute_indent = offset.* + line_indent;
+                const line_indent = utils.calculateIndentationFrom(line[offset.*..], column.*);
+                const absolute_indent = column.* + line_indent;
 
                 if (absolute_indent >= item_indent) {
-                    // Consume the required indentation
-                    // We need to consume (item_indent - offset.*) spaces
+                    // Consume the required indentation (in columns, not bytes)
+                    // We need to consume (item_indent - column.*) columns
                     // If we've already consumed more than needed, don't consume more
-                    if (offset.* < item_indent) {
-                        const spaces_to_consume = item_indent - offset.*;
-                        offset.* += utils.skipSpaces(line[offset.*..], spaces_to_consume);
+                    if (column.* < item_indent) {
+                        const columns_to_consume = item_indent - column.*;
+                        const skip_result = utils.skipSpacesFrom(line[offset.*..], columns_to_consume, column.*);
+                        offset.* += skip_result.bytes_consumed;
+                        column.* += skip_result.columns_consumed;
                     }
                     return true;
                 }
@@ -638,16 +691,23 @@ pub const BlockParser = struct {
         self.tip.appendChild(quote);
         self.tip = quote;
 
-        // Remove the > and optional following space
-        var content = line[1..];
-        if (content.len > 0 and (content[0] == ' ' or content[0] == '\t')) {
-            content = content[1..];
-        }
+        // Remove the > and optional following space (up to 1 column)
+        // Use column-based skipping to handle tabs correctly
+        const after_marker = line[1..];
+        const skip_result = try utils.skipIndentationAllocFrom(self.arena_allocator, after_marker, 1, 1);
+        const content = skip_result.content;
 
         // If content is now empty, just return
         if (content.len == 0) {
             return true;
         }
+
+        // Update column position for recursive processing
+        // We've consumed '>' (1 column) and up to 1 more column for optional space
+        // The prepended spaces from partial tab consumption are part of the content now
+        const saved_column = self.column;
+        const columns_consumed = 2; // '>' plus optional space (1 column each)
+        self.column = saved_column + columns_consumed;
 
         // Update current_line_remaining for recursive call
         const saved_line = self.current_line_remaining;
@@ -658,6 +718,7 @@ pub const BlockParser = struct {
 
         // Restore for safety (though it shouldn't matter)
         self.current_line_remaining = saved_line;
+        self.column = saved_column;
 
         return true;
     }
@@ -887,8 +948,8 @@ pub const BlockParser = struct {
             code.literal = try self.arena_allocator.dupe(u8, "");
         }
 
-        // Remove 4 spaces of indentation, handling partial tabs correctly
-        const result = try utils.skipIndentationAlloc(self.arena_allocator, line, 4);
+        // Remove 4 spaces of indentation, accounting for column offset from container matching
+        const result = try utils.skipIndentationAllocFrom(self.arena_allocator, line, 4, self.column);
         const content = result.content;
 
         // Append line to code block literal
@@ -1094,21 +1155,25 @@ pub const BlockParser = struct {
         // Calculate marker width and content indent
         const marker_width = marker_end + 1; // +1 for the required space
 
-        // Calculate how much indentation the content has
-        // Skip the marker and the required space
-        var content_start = marker_end + 1;
+        // Skip the marker and the required space (up to 1 column)
+        // Use column-based skipping to handle tabs correctly
+        const after_marker = line[marker_end..];
+        const skip_required = try utils.skipIndentationAllocFrom(self.arena_allocator, after_marker, 1, marker_end);
+        var after_required = skip_required.content;
 
         // Count additional spaces/tabs after the required space
         var spaces_count: usize = 0;
-        var temp_pos = content_start;
-        while (temp_pos < line.len) {
-            const c = line[temp_pos];
+        var temp_pos: usize = 0;
+        while (temp_pos < after_required.len) {
+            const c = after_required[temp_pos];
             if (c == ' ') {
                 spaces_count += 1;
                 temp_pos += 1;
             } else if (c == '\t') {
                 // Tab counts as moving to next tab stop
-                spaces_count += 4 - ((marker_width + spaces_count) % 4);
+                // We're now at column (marker_width + spaces_count), but need to account for partial tab
+                const current_col = marker_width + spaces_count;
+                spaces_count += 4 - (current_col % 4);
                 temp_pos += 1;
                 break;
             } else {
@@ -1120,18 +1185,16 @@ pub const BlockParser = struct {
         // If there are 4+ spaces, it's an indented code block - don't consume the extra spaces
         // Otherwise, consume up to 3 additional spaces (N can be 1-4 total)
         var spaces_after_marker: usize = 0;
+        var content: []const u8 = "";
         if (spaces_count >= 4) {
             // Leave all extra spaces for indented code block processing
             spaces_after_marker = 0;
-            // content_start stays at marker_end + 1 (after required space)
+            content = after_required;
         } else {
             // Consume these spaces (up to 3 additional)
             spaces_after_marker = spaces_count;
-            content_start = temp_pos;
+            content = if (temp_pos < after_required.len) after_required[temp_pos..] else "";
         }
-
-        // Get the actual content
-        const content = if (content_start < line.len) line[content_start..] else "";
 
         // Content indent calculation:
         // If there's no content on this line, use marker + 1 space as the required indentation
@@ -1215,6 +1278,13 @@ pub const BlockParser = struct {
 
         // Add content if present
         if (content.len > 0) {
+            // Update column position for recursive processing
+            // We've consumed the marker + required space + any additional spaces
+            // The partial_tab_spaces are prepended to content, so they don't reduce columns consumed
+            const saved_column = self.column;
+            const columns_consumed = marker_width + spaces_after_marker;
+            self.column = saved_column + columns_consumed;
+
             // Update current_line_remaining for recursive call
             const saved_line = self.current_line_remaining;
             self.current_line_remaining = content;
@@ -1225,6 +1295,7 @@ pub const BlockParser = struct {
 
             // Restore for safety (though it shouldn't matter)
             self.current_line_remaining = saved_line;
+            self.column = saved_column;
         }
 
         return true;

@@ -16,22 +16,38 @@
   - [ ] Group failures by section
   - [ ] Priority: sections with most failures
 
-### Systematic Bug Fixing
-- [ ] Fix failures by category:
-  - [ ] **Tabs** (usually in tab expansion)
-  - [ ] **Precedence** (block parsing order)
-  - [ ] **Thematic breaks** (edge cases)
-  - [ ] **Headings** (ATX and Setext edge cases)
-  - [ ] **Code blocks** (fenced vs indented)
-  - [ ] **HTML blocks** (all 7 types)
-  - [ ] **Paragraphs** (lazy continuation)
-  - [ ] **Block quotes** (nesting, lazy)
-  - [ ] **Lists** (tight/loose, nesting, interruption)
-  - [ ] **Inlines** (delimiter runs)
-  - [ ] **Code spans** (backtick matching)
-  - [ ] **Emphasis** (complex nesting)
-  - [ ] **Links** (all forms, precedence)
-  - [ ] **Images** (same as links)
+### Systematic Bug Fixing (17 tests remaining)
+
+#### **Tabs** (0 tests) - COMPLETED ✅
+  - [x] Example 5 (lines 395-407): Tab in list with code block - FIXED ✅
+  - [x] Example 6 (lines 418-425): Tab in blockquote with code block - FIXED ✅
+  - [x] Example 7 (lines 427-436): Tab after list marker should create code block - FIXED ✅
+  - [x] Example 9 (lines 448-464): Tab handling in nested lists - FIXED ✅
+
+#### **Link Reference Definitions** (1 test)
+  - [ ] Example 206 (lines 3348-3354): Case-insensitive Unicode matching (Greek ΑΓΩ/αγω)
+
+#### **List Items** (2 tests)
+  - [ ] Example 259 (lines 3348-3354): Tight/loose detection in nested blockquotes
+  - [ ] Example 260 (lines 4278-4291): Tight/loose detection with blank lines
+
+#### **Lists** (1 test)
+  - [ ] Example 319 (lines 5690-5708): Tight/loose detection with nested lists
+
+#### **Emphasis and Strong Emphasis** (6 tests)
+  - [ ] Example 362 (lines 6421-6425): Unicode Cyrillic with underscores (should NOT emphasize)
+  - [ ] Example 388 (lines 6672-6676): Unicode Cyrillic with double underscores (should NOT bold)
+  - [ ] Example 411 (lines 6882-6886): Nested emphasis/strong `*foo**bar**baz*`
+  - [ ] Example 412 (lines 6906-6910): Complex emphasis `*foo**bar*`
+  - [ ] Example 415 (lines 6933-6937): Complex emphasis `*foo**bar***`
+  - [ ] Example 429 (lines 7049-7053): Nested strong/emphasis `**foo*bar*baz**`
+
+#### **Links** (2 tests)
+  - [ ] Example 520 (lines 7900-7904): Nested image/link alt text handling
+  - [ ] Example 552 (lines 8294-8305): Link reference with whitespace in label
+
+#### **Images** (1 test)
+  - [ ] Example 575 (lines 8564-8568): Image alt text with inline link
 
 ### Debugging Tools
 - [ ] Add AST dump functionality (for debugging)
@@ -44,8 +60,9 @@
   - [x] 25% (163 tests) ✅
   - [x] 50% (326 tests) ✅
   - [x] 75% (489 tests) ✅
-  - [~] 90% (587 tests) - **Currently at 89.7% (585/652)** 🎯
-  - [ ] 95% (619 tests)
+  - [x] 90% (587 tests) ✅
+  - [x] 95% (619 tests) ✅
+  - [x] 97% (635 tests) - **Currently at 97.9% (638/652)** 🎯
   - [ ] 99% (646 tests)
   - [ ] 100% (652 tests) 🎉
 
@@ -138,15 +155,24 @@
 ## Current Status
 
 **Phase**: Phase 5 - Testing & Compliance (In Progress)
-**Tests Passing**: 635/652 (97.4%) ⬆️ from 630
+**Tests Passing**: 638/652 (97.9%) ⬆️ from 636
 **Last Updated**: 2026-01-22
-**Status**: Excellent progress - improved from 96.6% to 97.4%
-**Progress**:
-- ✅ Fixed Raw HTML tests (5 tests) - proper HTML tag/attribute validation including multi-line tags, attribute spacing, HTML comments, backslash handling
-- ⚠️  Tabs (4 tests) - requires architectural refactoring of offset tracking system
-- ⚠️  Emphasis (6 tests) - complex delimiter matching with Unicode/nested emphasis
-- ⚠️  Links/Images/Lists (7 tests) - various edge cases
-**Current Work**: Achieved 97.4% compliance. Remaining 17 tests require significant refactoring.
+**Status**: Systematically fixing remaining 14 test failures
+
+**Remaining Test Failures (14 total)**:
+- Emphasis: 6 tests (Examples 362, 388, 411, 412, 415, 429) - Unicode & complex nesting
+- Lists: 3 tests (Examples 259, 260, 319) - tight/loose detection
+- Links: 2 tests (Examples 520, 552) - nested/whitespace handling
+- Images: 1 test (Example 575) - alt text with inline links
+- Link Refs: 1 test (Example 206) - Unicode case-insensitive matching
+- List Items: 1 test - tight/loose detection
+
+**Current Work**:
+- ✅ Fixed ALL Tabs tests (Examples 5, 6, 7, 9)
+- ✅ Implemented proper tab expansion with column tracking
+- ✅ Fixed blockquote and list item parsing to handle tabs correctly
+- ✅ Created `skipIndentationAllocFrom`, `calculateIndentationFrom`, `skipSpacesFrom` for column-aware tab handling
+- 🔨 Now working on Link Reference Definitions (Example 206)
 
 
 ## Notes

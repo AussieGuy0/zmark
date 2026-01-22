@@ -47,14 +47,23 @@ pub fn isBlankLine(s: []const u8) bool {
 
 // Calculate indentation taking into account tabs (tab = 4 spaces)
 pub fn calculateIndentation(s: []const u8) usize {
+    return calculateIndentationFrom(s, 0);
+}
+
+// Calculate indentation starting from a given column position
+// This is needed for proper tab expansion when starting mid-line
+pub fn calculateIndentationFrom(s: []const u8, start_column: usize) usize {
     var indent: usize = 0;
+    var actual_col: usize = start_column;
     for (s) |ch| {
         if (ch == ' ') {
             indent += 1;
+            actual_col += 1;
         } else if (ch == '\t') {
             // Tab advances to next column that is a multiple of 4
-            const spaces_to_add = 4 - (indent % 4);
+            const spaces_to_add = 4 - (actual_col % 4);
             indent += spaces_to_add;
+            actual_col += spaces_to_add;
         } else {
             break;
         }
@@ -87,29 +96,41 @@ pub fn skipIndentation(s: []const u8, columns: usize) []const u8 {
     return s[i..];
 }
 
+// Return type for skipIndentation functions
+pub const SkipIndentResult = struct { content: []const u8, allocated: bool, partial_tab_spaces: usize };
+
 // Skip n columns of indentation, properly handling partial tabs by allocating
 // Returns: slice (potentially allocated), whether it was allocated, partially consumed tab spaces
-pub fn skipIndentationAlloc(allocator: std.mem.Allocator, s: []const u8, columns: usize) !struct { content: []const u8, allocated: bool, partial_tab_spaces: usize } {
+pub fn skipIndentationAlloc(allocator: std.mem.Allocator, s: []const u8, columns: usize) !SkipIndentResult {
+    return skipIndentationAllocFrom(allocator, s, columns, 0);
+}
+
+// Skip indentation starting from a given column offset (for handling tabs after partial consumption)
+pub fn skipIndentationAllocFrom(allocator: std.mem.Allocator, s: []const u8, columns: usize, start_column: usize) !SkipIndentResult {
     var col: usize = 0;
+    var actual_col: usize = start_column; // Track actual column position for tab expansion
     var i: usize = 0;
     var partial_tab_spaces: usize = 0;
 
     while (i < s.len and col < columns) {
         if (s[i] == ' ') {
             col += 1;
+            actual_col += 1;
             i += 1;
         } else if (s[i] == '\t') {
-            // Tab advances to next multiple of 4
-            const spaces_to_add = 4 - (col % 4);
+            // Tab advances to next multiple of 4, based on actual column position
+            const spaces_to_add = 4 - (actual_col % 4);
             if (col + spaces_to_add <= columns) {
                 // Consume the entire tab
                 col += spaces_to_add;
+                actual_col += spaces_to_add;
                 i += 1;
             } else {
                 // Partially consume the tab
                 const consumed = columns - col;
                 partial_tab_spaces = spaces_to_add - consumed;
                 col = columns;
+                actual_col += spaces_to_add;
                 i += 1;
 
                 // Need to prepend spaces for unconsumed part of tab
@@ -132,24 +153,38 @@ pub fn skipIndentationAlloc(allocator: std.mem.Allocator, s: []const u8, columns
 
 // Skip n columns of indentation and return number of bytes consumed
 pub fn skipSpaces(s: []const u8, columns: usize) usize {
+    return skipSpacesFrom(s, columns, 0).bytes_consumed;
+}
+
+pub const SkipSpacesResult = struct {
+    bytes_consumed: usize,
+    columns_consumed: usize,
+};
+
+// Skip n columns of indentation starting from a given column position
+// Returns number of bytes consumed
+pub fn skipSpacesFrom(s: []const u8, columns: usize, start_column: usize) SkipSpacesResult {
     var col: usize = 0;
+    var actual_col: usize = start_column;
     var i: usize = 0;
 
     while (i < s.len and col < columns) {
         if (s[i] == ' ') {
             col += 1;
+            actual_col += 1;
             i += 1;
         } else if (s[i] == '\t') {
-            // Tab advances to next multiple of 4
-            const spaces_to_add = 4 - (col % 4);
+            // Tab advances to next multiple of 4 based on actual column position
+            const spaces_to_add = 4 - (actual_col % 4);
             col += spaces_to_add;
+            actual_col += spaces_to_add;
             i += 1;
         } else {
             break;
         }
     }
 
-    return i;
+    return .{ .bytes_consumed = i, .columns_consumed = col };
 }
 
 test "trim" {
