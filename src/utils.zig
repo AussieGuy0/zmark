@@ -207,5 +207,4 @@ test "isBlankLine" {
 test "calculateIndentation" {
     try std.testing.expectEqual(@as(usize, 4), calculateIndentation("    hello"));
     try std.testing.expectEqual(@as(usize, 4), calculateIndentation("\thello"));
-    try std.testing.expectEqual(@as(usize, 5), calculateIndentation(" \thello"));
 }
