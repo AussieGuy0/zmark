@@ -1,0 +1,14 @@
+.{
+    .name = .zmark,
+    .version = "0.1.0",
+    .fingerprint = 0x3270221e2f7907de,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "src",
+        "tests",
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "LICENSE",
+    },
+}
