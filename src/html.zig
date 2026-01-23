@@ -371,7 +371,7 @@ test "html renderer basic" {
     root.appendChild(para);
     para.appendChild(text);
 
-    var renderer = HtmlRenderer.init(allocator);
+    var renderer = try HtmlRenderer.init(allocator);
     defer renderer.deinit();
 
     const html = try renderer.render(root);

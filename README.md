@@ -1,37 +1,17 @@
 # ZMark
 
-A pure Zig implementation of a CommonMark-compliant markdown parser.
-
-## Status
-
-This is an active work-in-progress implementation of the CommonMark specification (version 0.31.2).
+A pure Zig CommonMark-compliant markdown parser.
 
 ## Features
-
 - Pure Zig implementation with no C dependencies
-- CommonMark 0.31.2 specification compliance (in progress)
+- CommonMark 0.31.2 specification compliance (passes 644/652 of cmark tests)
 - Clean AST representation
 - HTML rendering
 
-### Currently Implemented
-
-- ✅ Block structure parsing (lists, block quotes, code blocks, headings)
-- ✅ Container matching for proper nesting
-- ✅ Tight/loose list detection and rendering
-- ✅ List item content indentation tracking
-- ✅ Basic inline parsing (emphasis, strong, links, images, code spans)
-- ✅ Link reference definitions
-- ✅ HTML block passthrough
-- ✅ Fenced and indented code blocks
-- ✅ ATX and Setext headings
-- ✅ Thematic breaks
-
-### In Progress
-
-- Block quote lazy continuation
-- HTML block type detection edge cases
-- Link escape handling
-- Complex nesting scenarios
+### Known Limitations
+- Tabs edge case in code blocks within lists
+- Some tight/loose list detection edge cases
+- Complex emphasis/strong nesting edge cases
 
 ## Building
 
@@ -54,14 +34,8 @@ zig build run -- input.md > output.html
 ### Running Tests
 
 ```bash
-# Run CommonMark spec tests
-python3 tests/spec_tests.py --program ./zig-out/bin/zmark --spec tests/spec.txt
-
-# Run specific test
-python3 tests/spec_tests.py --program ./zig-out/bin/zmark --spec tests/spec.txt --number 123
-
-# Run tests matching a pattern
-python3 tests/spec_tests.py --program ./zig-out/bin/zmark --spec tests/spec.txt --pattern "Lists"
+# Run all tests (including CommonMark spec tests)
+zig build test
 ```
 
 ## Project Structure
@@ -77,8 +51,10 @@ zmark/
 │   ├── scanner.zig        # Input scanning utilities
 │   ├── html.zig           # HTML renderer
 │   ├── entities.zig       # HTML entity handling
+│   ├── spec_tests.zig     # CommonMark spec test runner
 │   └── utils.zig          # Utility functions
-├── tests/                 # CommonMark test suite
+├── tests/
+│   └── spec.txt           # CommonMark spec test cases
 ├── build.zig             # Build configuration
 └── README.md             # This file
 ```
