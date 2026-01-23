@@ -6,6 +6,10 @@ const Scanner = @import("scanner.zig").Scanner;
 const BlockParser = @import("blocks.zig").BlockParser;
 const InlineParser = @import("inlines.zig").InlineParser;
 
+// Re-export for library usage
+pub const html = @import("html.zig");
+pub const node = @import("node.zig");
+
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,

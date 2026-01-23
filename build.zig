@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Library module for use as a dependency
+    _ = b.addModule("zmark", .{
+        .root_source_file = b.path("src/parser.zig"),
+    });
+
     // Executable
     const exe = b.addExecutable(.{
         .name = "zmark",

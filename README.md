@@ -21,6 +21,46 @@ zig build
 
 ## Usage
 
+### As a Library
+
+Add zmark to your project's `build.zig.zon`:
+
+```bash
+zig fetch --save git+https://github.com/AussieGuy0/zmark
+```
+
+Then in your `build.zig`:
+
+```zig
+const zmark = b.dependency("zmark", .{});
+exe.root_module.addImport("zmark", zmark.module("zmark"));
+```
+
+Use in your code:
+
+```zig
+const std = @import("std");
+const zmark = @import("zmark");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parser = try zmark.Parser.init(allocator);
+    defer parser.deinit();
+
+    const ast = try parser.parse("# Hello, World!");
+    
+    var renderer = try zmark.html.HtmlRenderer.init(allocator);
+    defer renderer.deinit();
+    const output = try renderer.render(ast);
+    defer allocator.free(output);
+    
+    std.debug.print("{s}", .{output});
+}
+```
+
 ### As a CLI tool
 
 ```bash
